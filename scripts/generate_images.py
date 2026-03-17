@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate PPT-style slide images with Alibaba Cloud Model Studio."""
+"""Generate mixed-shot knowledge-video images with Alibaba Cloud Model Studio."""
 
 from __future__ import annotations
 
@@ -83,7 +83,149 @@ def ensure_api_key() -> str:
     return api_key
 
 
+def _format_list(items: List[str], bullet: str = "- ") -> List[str]:
+    return [f"{bullet}{item}" for item in items if item]
+
+
+def _shot_type_label(shot_type: str) -> str:
+    mapping = {
+        "ppt_slide": "演示页镜头",
+        "infographic": "信息图镜头",
+        "concept_scene": "概念场景镜头",
+        "comparison_frame": "对比镜头",
+        "process_frame": "流程镜头",
+        "quote_frame": "金句收束镜头",
+    }
+    return mapping.get(shot_type, "知识讲解镜头")
+
+
+def _shot_type_instructions(slide_spec: Dict[str, Any]) -> List[str]:
+    shot_type = slide_spec["shot_type"]
+    layout_map = {
+        "CenterLayout": "居中封面布局",
+        "SplitLayout": "左右分栏布局",
+        "StackLayout": "上下分层布局",
+        "GridLayout": "信息网格布局",
+        "TripleLayout": "三列信息布局",
+        "CardLayout": "卡片式摘要布局",
+    }
+
+    if shot_type == "ppt_slide":
+        lines = [
+            "这是知识视频中的高质量中文演示页镜头，要有清晰版式、图形主体和适量文字，不是纯文字白板。",
+            f"版式优先参考：{layout_map.get(slide_spec['layout_family'], '卡片式摘要布局')}。",
+        ]
+        if slide_spec["ppt_visual"].get("图示提示"):
+            lines.append(f"图示方向：{slide_spec['ppt_visual']['图示提示']}")
+        return lines
+    if shot_type == "infographic":
+        return [
+            "这镜必须明显呈现结构化信息图语言，强调模块、节点、箭头、关系线、卡片层次。",
+            "不要把它做成一页普通 PPT，也不要只放一个孤立主体。",
+        ]
+    if shot_type == "concept_scene":
+        return [
+            "这镜应更像概念插画或叙事场景，用主体、动作和空间隐喻表达抽象观点。",
+            "不要默认做成卡片页面，不要堆满说明文字。",
+        ]
+    if shot_type == "comparison_frame":
+        return [
+            "这镜必须存在明显的左右或上下对照，两组对象差异一眼可见。",
+            "要用分隔、方向、箭头或光线对比建立比较关系，而不是只有两个并排元素。",
+        ]
+    if shot_type == "process_frame":
+        return [
+            "这镜必须体现步骤、阶段或演进顺序，让观众一眼看出流程推进。",
+            "使用路径、阶段块、递进箭头或层层展开的结构，不要只是静态拼贴。",
+        ]
+    if shot_type == "quote_frame":
+        return [
+            "这镜是收束型金句画面，应明显留白、焦点集中、情绪稳定。",
+            "不要做成复杂信息图，不要堆叠多个主体。",
+        ]
+    return ["这镜需要服务知识讲解，信息和视觉都要明确。"]
+
+
+def _semantic_visual_instructions(slide_spec: Dict[str, Any]) -> List[str]:
+    subject_elements = slide_spec["subject_elements"]
+    action_relations = slide_spec["action_relations"]
+    info_layers = slide_spec["information_layers"]
+    composition = slide_spec["composition"]
+    style_anchor = slide_spec["style_anchor"]
+    allowed_text = set(
+        item
+        for item in [
+            slide_spec["text_policy"]["title"],
+            slide_spec["text_policy"]["subtitle"],
+            *slide_spec["text_policy"]["bullets"],
+            *slide_spec["text_policy"]["data_cards"],
+        ]
+        if item
+    )
+
+    non_text_subjects = [item for item in subject_elements if item not in allowed_text]
+
+    lines = [
+        "请把抽象含义转成图形、主体、图标、结构、动作和空间关系，而不是把说明句直接写在画面上。",
+        f"核心含义围绕 {slide_spec['visual_target'].rstrip('。')} 展开。",
+    ]
+    if non_text_subjects:
+        lines.append("以下概念只作为视觉语义参考，应尽量通过图标、模块、角色或结构表达，不要原样渲染成中文大字：")
+        lines.extend(_format_list(non_text_subjects))
+    if action_relations:
+        lines.append("请通过视觉关系表达这些关系或动作，而不是把它们写成说明文字：")
+        lines.extend(_format_list(action_relations))
+    lines.extend(
+        [
+            f"构图采用 {composition['构图']}，景别为 {composition['景别']}，视角为 {composition['视角']}。",
+            f"前景重点放在 {info_layers['前景']}，中景放在 {info_layers['中景']}，背景服务 {info_layers['背景']}。",
+            f"整体风格使用 {style_anchor['main_style']}，当前镜头偏向 {style_anchor['current_variant']}。",
+            f"色调控制为 {style_anchor['palette']}，光线为 {style_anchor['lighting']}，画面密度保持 {style_anchor['density']}。",
+        ]
+    )
+    return lines
+
+
+def _text_policy_instructions(slide_spec: Dict[str, Any]) -> List[str]:
+    text_policy = slide_spec["text_policy"]
+    mode = text_policy["mode"]
+    title = text_policy["title"]
+    subtitle = text_policy["subtitle"]
+    bullets = text_policy["bullets"]
+    data_cards = text_policy["data_cards"]
+
+    lines = ["文字必须使用简体中文，不允许额外英文，不允许出现提示词原文。"]
+    if mode == "none":
+        lines.append("这镜尽量不要出现上屏大字；如必须出现，只允许极少量标签级中文。")
+        return lines
+    if mode == "title_only":
+        lines.append("只允许出现以下上屏文字，不要额外扩写：")
+        lines.extend(_format_list([title, subtitle]))
+        return lines
+    if mode == "title_plus_bullets":
+        lines.append("允许出现的上屏文字只有以下这些：")
+        lines.extend(_format_list([title, subtitle]))
+        if bullets:
+            lines.append("项目符号只允许使用这些中文短句：")
+            lines.extend(_format_list(bullets))
+        return lines
+    if mode == "title_plus_data":
+        lines.append("允许出现的上屏文字只有以下这些：")
+        lines.extend(_format_list([title, subtitle]))
+        if data_cards:
+            lines.append("数据卡只允许使用这些中文短句：")
+            lines.extend(_format_list(data_cards))
+        return lines
+    if mode == "quote_only":
+        lines.append("画面只允许出现这一句中文短句，放在最强视觉焦点：")
+        lines.extend(_format_list([title]))
+        return lines
+    return lines
+
+
 def build_prompt(slide_spec: Dict[str, Any]) -> str:
+    text_policy = slide_spec["text_policy"]
+
     layout_map = {
         "CenterLayout": "居中封面布局",
         "SplitLayout": "左右分栏布局",
@@ -93,40 +235,52 @@ def build_prompt(slide_spec: Dict[str, Any]) -> str:
         "CardLayout": "卡片式摘要布局",
     }
     lines = [
-        "请生成一张 16:9 横版中文科技讲解幻灯片。",
-        "这是一页正式的企业科技演示文稿，用于视频正文讲解，不是海报，不是封面，不是杂志排版。",
-        "画面中的上屏文字只能使用我下面列出的中文文案，不要出现额外英文，不要出现布局名，不要出现提示语，不要出现说明文字。",
-        f"版式要求：{layout_map.get(slide_spec['layout_family'], '卡片式摘要布局')}。",
-        f"页面大标题只写：{slide_spec['title']}",
+        "请生成一张 16:9 横版中文知识讲解视频静帧。",
+        f"这是第 {slide_spec['shot_num']} 镜，镜头类型是：{_shot_type_label(slide_spec['shot_type'])}。",
+        "这是一张服务视频剪辑的单镜头画面，不是电影海报，不是杂志封面，不是截图拼贴，不是默认模板页。",
+        "除明确允许的上屏文字外，任何说明句、标签名、字段名、提示词原文都不得出现在画面里。",
     ]
-    if slide_spec["subtitle"]:
-        lines.append(f"页面副标题只写：{slide_spec['subtitle']}")
-    if slide_spec["bullets"]:
-        lines.append("页面需要 2 到 3 条简短项目符号，只能使用这些中文短句：")
-        lines.extend([f"- {item}" for item in slide_spec["bullets"]])
-    if slide_spec["data_cards"]:
-        lines.append("页面需要独立数据卡，只能使用这些卡片文字：")
-        lines.extend([f"- {item}" for item in slide_spec["data_cards"]])
-    if slide_spec["diagram_hint"]:
-        lines.append(f"配图要求：{slide_spec['diagram_hint']}")
+    lines.extend(_shot_type_instructions(slide_spec))
+    lines.extend(_semantic_visual_instructions(slide_spec))
+    if slide_spec["shot_type"] == "ppt_slide":
+        lines.append(f"PPT 布局参考：{layout_map.get(slide_spec['layout_family'], '卡片式摘要布局')}")
+    lines.extend(_text_policy_instructions(slide_spec))
     if slide_spec["data_layer"]:
         lines.append("辅助背景信息：")
         lines.extend([f"- {k}: {v}" for k, v in slide_spec["data_layer"].items()])
     lines.extend(
         [
-            "视觉风格：蓝白科技感，干净留白，信息卡片清晰，适合企业技术演示。",
-            "文字要求：简体中文，大字清晰，高对比度，不要改写标题，不要乱码，不要写成长段落，不要把本段指令文字写进画面。",
-            "图形要求：使用简单图标、卡片、箭头、分栏和信息图风格，但不要把这些要求文字写到画面中。",
+            "请保证画面有明确的主焦点和层次，不要所有元素等权平铺。",
+            "如果镜头需要结构感，请明显做出模块关系、对照结构或流程方向，不要靠抽象背景敷衍。",
+            "如果镜头需要场景感，请通过主体、动作、空间深度和光线氛围体现，而不是只做一张带标题的平面页。",
+            "中文如果出现，必须大字、清晰、高对比度、简洁，不要乱码，不要长段落。",
+            "不要把本段提示词、布局名、镜头类型名、英文说明文字写进画面。",
         ]
     )
     return "\n".join(lines)
 
 
-def build_negative_prompt() -> str:
+def build_negative_prompt(slide_spec: Dict[str, Any]) -> str:
+    shot_type = slide_spec["shot_type"]
+    shot_specific: Dict[str, str] = {
+        "ppt_slide": "cinematic poster, dramatic movie still, photoreal character portrait dominating frame",
+        "infographic": "single isolated object, empty background, purely decorative abstract shapes, poster slogan",
+        "concept_scene": "dense bullet list, template slide page, spreadsheet look, wall of text",
+        "comparison_frame": "single centered composition, no contrast split, mirrored duplicate layout",
+        "process_frame": "random collage, unordered objects, no directional flow, single hero object",
+        "quote_frame": "busy infographic, many small cards, dense dashboard, overcomplicated diagram",
+    }
+    avoid_items = ", ".join(slide_spec.get("avoid_items", []))
+    leaked_labels = (
+        "口播语义参考, 视觉目标, 镜头标题, 主体元素, 动作或关系, 构图与景别, 信息层级, "
+        "主视觉风格, 当前镜头变体, 画面密度, 允许出现的上屏文字, 数据卡只允许使用这些中文短句, "
+        "项目符号只允许使用这些中文短句"
+    )
     return (
         "movie poster, cinematic poster, tiny unreadable text, dense paragraph, watermark, "
         "photo collage, handwritten font, distorted characters, garbled Chinese text, "
-        "irrelevant brand logos, cluttered composition, layout label, prompt text, English copy"
+        "irrelevant brand logos, cluttered composition, layout label, prompt text, English copy, "
+        f"{shot_specific.get(shot_type, '')}, {leaked_labels}, {avoid_items}"
     )
 
 
@@ -204,7 +358,7 @@ def generate_attempt(
         }
 
     prompt = build_prompt(slide_spec)
-    negative_prompt = build_negative_prompt()
+    negative_prompt = build_negative_prompt(slide_spec)
     prompt_path.write_text(prompt, encoding="utf-8")
 
     request_payload = {
@@ -312,7 +466,7 @@ def generate_images_for_storyboard(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="生成阿里云 PPT 风格图片")
+    parser = argparse.ArgumentParser(description="生成阿里云知识视频混合镜头图片")
     parser.add_argument("storyboard", help="分镜脚本路径")
     parser.add_argument("-o", "--output", required=True, help="输出目录，例如 05-images/video-1")
     parser.add_argument("--attempt", type=int, default=1, help="语义生成轮次，从 1 开始")

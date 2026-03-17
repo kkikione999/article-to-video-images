@@ -1,26 +1,56 @@
 #!/usr/bin/env python3
-"""Review generated slide attempts and promote compose-eligible images."""
+"""Review generated mixed-shot images and promote compose-eligible attempts."""
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import dashscope
-from PIL import Image, ImageStat
+from PIL import Image, ImageFilter, ImageStat
 
-from _single_video_utils import normalize_for_match, parse_storyboard, safe_json_dump, safe_json_load
+from _single_video_utils import (
+    build_slide_spec,
+    normalize_for_match,
+    parse_storyboard,
+    safe_json_dump,
+    safe_json_load,
+)
 
 MIN_RATIO = 16 / 9 - 0.02
 MAX_RATIO = 16 / 9 + 0.02
 NEAR_BLANK_STDDEV = 8.0
 TOO_DARK = 20.0
 TOO_BRIGHT = 245.0
-OCR_MATCH_THRESHOLD = 0.6
+OCR_MATCH_THRESHOLD = 0.55
+OCR_MATCH_THRESHOLD_MINIMAL = 0.4
+LOW_EDGE_DENSITY = 0.035
+MEDIUM_EDGE_DENSITY = 0.055
+HIGH_EDGE_DENSITY = 0.18
+LOW_COLORFULNESS = 12.0
+MEDIUM_COLORFULNESS = 18.0
+NEIGHBOR_HASH_DISTANCE_SIMILAR = 5
+NEIGHBOR_HASH_DISTANCE_WEAK = 8
 ALLOWED_SELECTION_MODES = {"normal", "manual_degraded"}
+PROMPT_LEAK_MARKERS = [
+    "口播语义参考",
+    "视觉目标",
+    "镜头标题",
+    "主体元素",
+    "动作或关系",
+    "构图与景别",
+    "信息层级",
+    "主视觉风格",
+    "当前镜头变体",
+    "画面密度",
+    "允许出现的上屏文字",
+    "数据卡只允许使用这些中文短句",
+    "项目符号只允许使用这些中文短句",
+]
 
 
 def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
@@ -64,15 +94,6 @@ def parse_manual_reject(raw: Optional[str]) -> List[int]:
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
 
 
-def normalize_expected_phrases(shot: Dict[str, Any]) -> List[str]:
-    ppt = shot["ppt_visual"]
-    phrases = [ppt["主标题"]]
-    phrases.extend(ppt.get("要点", [])[:3])
-    phrases.extend(ppt.get("数据卡", [])[:3])
-    phrases.extend(list(shot["data_layer"].values())[:2])
-    return [item for item in phrases if item]
-
-
 def extract_ocr_text(image_path: Path) -> str:
     response = dashscope.MultiModalConversation.call(
         model="qwen-vl-ocr-latest",
@@ -102,17 +123,70 @@ def extract_ocr_text(image_path: Path) -> str:
     return _obj_get(output, "text", "") or ""
 
 
+def _average_hash(image: Image.Image, size: int = 8) -> str:
+    resized = image.convert("L").resize((size, size))
+    pixels = list(resized.getdata())
+    mean_value = sum(pixels) / len(pixels)
+    return "".join("1" if pixel >= mean_value else "0" for pixel in pixels)
+
+
+def _hash_distance(left: Optional[str], right: Optional[str]) -> Optional[int]:
+    if not left or not right or len(left) != len(right):
+        return None
+    return sum(1 for a, b in zip(left, right) if a != b)
+
+
+def _colorfulness(image: Image.Image) -> float:
+    sample = image.resize((160, 90)).convert("RGB")
+    pixels = list(sample.getdata())
+    if not pixels:
+        return 0.0
+
+    rg_values: List[float] = []
+    yb_values: List[float] = []
+    for r, g, b in pixels:
+        rg = abs(r - g)
+        yb = abs(0.5 * (r + g) - b)
+        rg_values.append(rg)
+        yb_values.append(yb)
+
+    def _mean(values: List[float]) -> float:
+        return sum(values) / len(values)
+
+    def _std(values: List[float], mean_value: float) -> float:
+        return math.sqrt(sum((value - mean_value) ** 2 for value in values) / len(values))
+
+    mean_rg = _mean(rg_values)
+    mean_yb = _mean(yb_values)
+    std_rg = _std(rg_values, mean_rg)
+    std_yb = _std(yb_values, mean_yb)
+    return round(math.sqrt(std_rg**2 + std_yb**2) + 0.3 * math.sqrt(mean_rg**2 + mean_yb**2), 2)
+
+
+def _edge_density(gray_image: Image.Image) -> float:
+    sampled = gray_image.resize((160, 90))
+    edged = sampled.filter(ImageFilter.FIND_EDGES)
+    pixels = list(edged.getdata())
+    if not pixels:
+        return 0.0
+    edge_pixels = sum(1 for value in pixels if value >= 36)
+    return round(edge_pixels / len(pixels), 4)
+
+
 def compute_image_metrics(image_path: Path) -> Dict[str, Any]:
     with Image.open(image_path) as image:
-        image = image.convert("RGB")
-        width, height = image.size
-        gray = image.convert("L")
+        rgb = image.convert("RGB")
+        width, height = rgb.size
+        gray = rgb.convert("L")
         stat = ImageStat.Stat(gray)
         return {
             "width": width,
             "height": height,
             "mean_brightness": round(float(stat.mean[0]), 2),
             "grayscale_stddev": round(float(stat.stddev[0]), 2),
+            "colorfulness": _colorfulness(rgb),
+            "edge_density": _edge_density(gray),
+            "ahash": _average_hash(rgb),
         }
 
 
@@ -125,12 +199,146 @@ def keyword_match_ratio(expected_phrases: List[str], ocr_text: str) -> float:
     return round(matched / len(candidates), 2)
 
 
+def _finalize_attempt_record(record: Dict[str, Any], attempt: int, max_attempts: int) -> Dict[str, Any]:
+    if not record["reason_codes"]:
+        record["status"] = "pass"
+        record["compose_eligible"] = True
+        record["manual_decision"] = "approve"
+        return record
+    record["status"] = "retry" if attempt < max_attempts else "fail"
+    record["compose_eligible"] = False
+    record["manual_decision"] = "pending"
+    return record
+
+
+def _apply_basic_image_checks(record: Dict[str, Any]) -> None:
+    metrics = record["metrics"]
+    ratio = metrics["width"] / metrics["height"]
+    if ratio < MIN_RATIO or ratio > MAX_RATIO:
+        record["reason_codes"].append("aspect_ratio_invalid")
+    if metrics["grayscale_stddev"] < NEAR_BLANK_STDDEV:
+        record["reason_codes"].append("near_blank")
+    if metrics["mean_brightness"] < TOO_DARK:
+        record["reason_codes"].append("too_dark")
+    if metrics["mean_brightness"] > TOO_BRIGHT:
+        record["reason_codes"].append("too_bright")
+
+
+def _apply_ocr_checks(record: Dict[str, Any], slide_spec: Dict[str, Any], ocr_text: str) -> None:
+    normalized_ocr = normalize_for_match(ocr_text)
+    expected_phrases = slide_spec["expected_text_phrases"]
+    text_mode = slide_spec["text_policy"]["mode"]
+    leaked_markers = [
+        marker
+        for marker in PROMPT_LEAK_MARKERS
+        if normalize_for_match(marker) and normalize_for_match(marker) in normalized_ocr
+    ]
+
+    record["metrics"]["ocr_text_length"] = len(normalized_ocr)
+    if leaked_markers:
+        record["metrics"]["prompt_leak_markers"] = leaked_markers
+        record["reason_codes"].append("prompt_meta_text_visible")
+
+    if expected_phrases:
+        ratio_score = keyword_match_ratio(expected_phrases, ocr_text)
+        record["metrics"]["ocr_keyword_match_ratio"] = ratio_score
+        title_match = normalize_for_match(expected_phrases[0]) in normalized_ocr
+        threshold = OCR_MATCH_THRESHOLD_MINIMAL if text_mode in {"title_only", "quote_only"} else OCR_MATCH_THRESHOLD
+        if not title_match or ratio_score < threshold:
+            record["reason_codes"].append("ocr_low_confidence")
+    else:
+        record["metrics"]["ocr_keyword_match_ratio"] = None
+
+    if text_mode == "none" and len(normalized_ocr) > 18:
+        record["reason_codes"].append("text_overload")
+    if text_mode in {"title_only", "quote_only"} and len(normalized_ocr) > 44:
+        record["reason_codes"].append("text_overload")
+    if text_mode in {"title_plus_bullets", "title_plus_data"} and len(normalized_ocr) > 72:
+        record["reason_codes"].append("text_overload")
+
+
+def _apply_richness_checks(record: Dict[str, Any], slide_spec: Dict[str, Any]) -> None:
+    metrics = record["metrics"]
+    shot_type = slide_spec["shot_type"]
+    density = slide_spec["style_anchor"]["density"]
+
+    if shot_type in {"infographic", "comparison_frame", "process_frame", "ppt_slide"} and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
+        record["reason_codes"].append("structure_too_flat")
+
+    if shot_type in {"infographic", "comparison_frame"} and metrics["colorfulness"] < LOW_COLORFULNESS:
+        record["reason_codes"].append("visual_richness_low")
+
+    if shot_type == "process_frame" and metrics["edge_density"] < 0.06:
+        record["reason_codes"].append("process_flow_missing")
+
+    if shot_type == "comparison_frame" and metrics["edge_density"] < 0.065:
+        record["reason_codes"].append("comparison_structure_missing")
+
+    if shot_type == "concept_scene":
+        if metrics["edge_density"] < LOW_EDGE_DENSITY and metrics["colorfulness"] < MEDIUM_COLORFULNESS:
+            record["reason_codes"].append("scene_depth_low")
+
+    if shot_type == "quote_frame":
+        if metrics["edge_density"] > HIGH_EDGE_DENSITY:
+            record["reason_codes"].append("quote_frame_too_busy")
+
+    if density == "dense" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
+        record["reason_codes"].append("density_underdelivered")
+
+    if density == "sparse" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+        record["reason_codes"].append("density_too_busy")
+
+
+def _latest_attempt_record(shot_state: Dict[str, Any], attempt: int) -> Optional[Dict[str, Any]]:
+    for record in reversed(shot_state.get("attempts", [])):
+        if record.get("attempt") == attempt:
+            return record
+    return None
+
+
+def _apply_neighbor_diversity_check(
+    record: Dict[str, Any],
+    slide_spec: Dict[str, Any],
+    shot_num: int,
+    shot_lookup: Dict[int, Dict[str, Any]],
+    state_map: Dict[int, Dict[str, Any]],
+    attempt: int,
+) -> None:
+    prev_state = state_map.get(shot_num - 1)
+    if not prev_state:
+        return
+
+    prev_record = _latest_attempt_record(prev_state, attempt)
+    if not prev_record:
+        approved_attempt = prev_state.get("approved_attempt")
+        if approved_attempt:
+            prev_record = _latest_attempt_record(prev_state, approved_attempt)
+    if not prev_record:
+        return
+
+    distance = _hash_distance(record["metrics"].get("ahash"), prev_record.get("metrics", {}).get("ahash"))
+    if distance is None:
+        return
+
+    record["metrics"]["neighbor_hash_distance"] = distance
+    prev_slide_spec = build_slide_spec(shot_lookup[shot_num - 1], attempt)
+
+    if distance <= NEIGHBOR_HASH_DISTANCE_SIMILAR:
+        if slide_spec["shot_type"] != prev_slide_spec["shot_type"]:
+            record["reason_codes"].append("neighbor_not_distinct")
+        elif slide_spec["shot_type"] != "quote_frame":
+            record["reason_codes"].append("neighbor_too_similar")
+    elif distance <= NEIGHBOR_HASH_DISTANCE_WEAK and slide_spec["shot_type"] != prev_slide_spec["shot_type"]:
+        record["reason_codes"].append("neighbor_variation_weak")
+
+
 def build_attempt_review(
     shot: Dict[str, Any],
     attempt: int,
     output_dir: Path,
     max_attempts: int,
 ) -> Dict[str, Any]:
+    slide_spec = build_slide_spec(shot, attempt)
     shot_dir = output_dir / "attempts" / f"shot-{shot['shot_num']:02d}"
     stem = f"attempt-{attempt:02d}"
     image_path = shot_dir / f"{stem}.png"
@@ -139,54 +347,36 @@ def build_attempt_review(
     base = {
         "shot_num": shot["shot_num"],
         "attempt": attempt,
+        "shot_type": slide_spec["shot_type"],
         "status": "retry",
         "compose_eligible": False,
         "manual_decision": "pending",
+        "selection_mode": None,
         "reason_codes": [],
         "metrics": {},
         "ocr_text": "",
+        "review_path": str(review_path),
     }
 
     if not image_path.exists():
         base["status"] = "retry" if attempt < max_attempts else "fail"
         base["reason_codes"] = ["no_image_artifact"]
-        safe_json_dump(review_path, base)
         return base
 
     metrics = compute_image_metrics(image_path)
     base["metrics"] = metrics
-
-    ratio = metrics["width"] / metrics["height"]
-    if ratio < MIN_RATIO or ratio > MAX_RATIO:
-        base["reason_codes"].append("aspect_ratio_invalid")
-    if metrics["grayscale_stddev"] < NEAR_BLANK_STDDEV:
-        base["reason_codes"].append("near_blank")
-    if metrics["mean_brightness"] < TOO_DARK:
-        base["reason_codes"].append("too_dark")
-    if metrics["mean_brightness"] > TOO_BRIGHT:
-        base["reason_codes"].append("too_bright")
+    _apply_basic_image_checks(base)
 
     try:
         ocr_text = extract_ocr_text(image_path)
         base["ocr_text"] = ocr_text
-        ratio_score = keyword_match_ratio(normalize_expected_phrases(shot), ocr_text)
-        base["metrics"]["ocr_keyword_match_ratio"] = ratio_score
-        title_match = normalize_for_match(shot["ppt_visual"]["主标题"]) in normalize_for_match(ocr_text)
-        if not title_match and ratio_score < OCR_MATCH_THRESHOLD:
-            base["reason_codes"].append("ocr_low_confidence")
+        _apply_ocr_checks(base, slide_spec, ocr_text)
     except Exception as exc:
         base["reason_codes"].append("ocr_api_unavailable")
         base["ocr_text"] = str(exc)
 
-    if not base["reason_codes"]:
-        base["status"] = "pass"
-        base["compose_eligible"] = True
-        base["manual_decision"] = "approve"
-    else:
-        base["status"] = "retry" if attempt < max_attempts else "fail"
-
-    safe_json_dump(review_path, base)
-    return base
+    _apply_richness_checks(base, slide_spec)
+    return _finalize_attempt_record(base, attempt, max_attempts)
 
 
 def _initial_review_state(shots: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -259,6 +449,7 @@ def review_images_for_attempt(
 ) -> Dict[str, Any]:
     ensure_api_key()
     shots = parse_storyboard(storyboard_path)
+    shot_lookup = {shot["shot_num"]: shot for shot in shots}
     if shot_numbers is None:
         if manual_degraded or manual_reject:
             selected_shots = set()
@@ -277,7 +468,21 @@ def review_images_for_attempt(
         shot_state = state_map[shot["shot_num"]]
         if shot_state.get("compose_eligible"):
             continue
+
         attempt_review = build_attempt_review(shot, attempt, output_path, max_attempts)
+        slide_spec = build_slide_spec(shot, attempt)
+        _apply_neighbor_diversity_check(
+            attempt_review,
+            slide_spec,
+            shot["shot_num"],
+            shot_lookup,
+            state_map,
+            attempt,
+        )
+        attempt_review["reason_codes"] = sorted(set(attempt_review["reason_codes"]))
+        attempt_review = _finalize_attempt_record(attempt_review, attempt, max_attempts)
+        safe_json_dump(Path(attempt_review["review_path"]), attempt_review)
+
         _replace_attempt_record(shot_state["attempts"], attempt_review)
         shot_state["current_status"] = attempt_review["status"]
         shot_state["manual_decision"] = attempt_review["manual_decision"]
@@ -312,7 +517,7 @@ def review_images_for_attempt(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="审核生成的幻灯片图片")
+    parser = argparse.ArgumentParser(description="审核生成的知识视频镜头图片")
     parser.add_argument("storyboard", help="分镜脚本路径")
     parser.add_argument("-o", "--output", required=True, help="输出目录，例如 05-images/video-1")
     parser.add_argument("--attempt", type=int, required=True, help="当前审核的 attempt 编号")
