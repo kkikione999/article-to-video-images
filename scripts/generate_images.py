@@ -99,6 +99,42 @@ def _shot_type_label(shot_type: str) -> str:
     return mapping.get(shot_type, "知识讲解镜头")
 
 
+def _cognitive_action_label(action: str) -> str:
+    mapping = {
+        "hook_question": "提问引入",
+        "define_claim": "定义判断",
+        "explain_mechanism": "机制解释",
+        "compare_contrast": "对比判断",
+        "show_process": "流程推进",
+        "show_evidence": "案例举证",
+        "summarize_close": "总结收束",
+    }
+    return mapping.get(action, action)
+
+
+def _page_archetype_label(page_archetype: str) -> str:
+    mapping = {
+        "thesis_page": "核心命题页",
+        "structure_page": "结构拆解页",
+        "comparison_page": "关系对照页",
+        "process_page": "流程推进页",
+        "evidence_page": "案例证据页",
+        "summary_page": "总结收束页",
+    }
+    return mapping.get(page_archetype, page_archetype)
+
+
+def _shot_flavor_label(shot_flavor: str) -> str:
+    mapping = {
+        "steady_explainer": "稳态讲解",
+        "contrast_tension": "冲突对照",
+        "zoom_focus": "压迫聚焦",
+        "layered_depth": "层次推进",
+        "quiet_resolve": "留白收束",
+    }
+    return mapping.get(shot_flavor, shot_flavor)
+
+
 def _shot_type_instructions(slide_spec: Dict[str, Any]) -> List[str]:
     shot_type = slide_spec["shot_type"]
     layout_map = {
@@ -146,6 +182,43 @@ def _shot_type_instructions(slide_spec: Dict[str, Any]) -> List[str]:
     return ["这镜需要服务知识讲解，信息和视觉都要明确。"]
 
 
+def _page_archetype_instructions(slide_spec: Dict[str, Any]) -> List[str]:
+    archetype = slide_spec["page_archetype"]
+    density = slide_spec["knowledge_density"]
+
+    lines = [
+        f"这是一页“{_page_archetype_label(archetype)}”，知识密度等级为 {density}。",
+    ]
+    if archetype == "thesis_page":
+        lines.append("一页只传达一个核心判断，信息集中，不要同时展开太多支线。")
+    elif archetype == "structure_page":
+        lines.append("需要把系统、模块或角色拆成有层级的结构页，让观众一眼看出组成关系。")
+    elif archetype == "comparison_page":
+        lines.append("必须是强对照知识页，至少两组对象差异明确，不允许含糊并排。")
+    elif archetype == "process_page":
+        lines.append("必须是推进型知识页，观众应该一眼看到步骤、顺序或演进关系。")
+    elif archetype == "evidence_page":
+        lines.append("这是证据页，要用案例、数据卡或事实支撑核心判断，不要空泛概念化。")
+    elif archetype == "summary_page":
+        lines.append("这是收束页，只保留最重要结论，允许留白，不要再引入新结构。")
+    return lines
+
+
+def _shot_flavor_instructions(slide_spec: Dict[str, Any]) -> List[str]:
+    flavor = slide_spec["shot_flavor"]
+    if flavor == "steady_explainer":
+        return ["镜头风味是稳态讲解，画面重在清晰、稳定、理性推进。"]
+    if flavor == "contrast_tension":
+        return ["镜头风味是冲突对照，画面需要明显张力和对立，不要平均分配注意力。"]
+    if flavor == "zoom_focus":
+        return ["镜头风味是压迫聚焦，主焦点必须强，周边信息要服从中心判断。"]
+    if flavor == "layered_depth":
+        return ["镜头风味是层次推进，前中后景或步骤层层递进，形成推进感。"]
+    if flavor == "quiet_resolve":
+        return ["镜头风味是留白收束，画面克制、安静、重结论，不要复杂化。"]
+    return []
+
+
 def _semantic_visual_instructions(slide_spec: Dict[str, Any]) -> List[str]:
     subject_elements = slide_spec["subject_elements"]
     action_relations = slide_spec["action_relations"]
@@ -167,6 +240,7 @@ def _semantic_visual_instructions(slide_spec: Dict[str, Any]) -> List[str]:
 
     lines = [
         "请把抽象含义转成图形、主体、图标、结构、动作和空间关系，而不是把说明句直接写在画面上。",
+        f"这页承担的认知动作是：{_cognitive_action_label(slide_spec['cognitive_action'])}。",
         f"核心含义围绕 {slide_spec['visual_target'].rstrip('。')} 展开。",
     ]
     if non_text_subjects:
@@ -235,12 +309,15 @@ def build_prompt(slide_spec: Dict[str, Any]) -> str:
         "CardLayout": "卡片式摘要布局",
     }
     lines = [
-        "请生成一张 16:9 横版中文知识讲解视频静帧。",
+        "请生成一张 16:9 横版中文知识镜头页。",
         f"这是第 {slide_spec['shot_num']} 镜，镜头类型是：{_shot_type_label(slide_spec['shot_type'])}。",
-        "这是一张服务视频剪辑的单镜头画面，不是电影海报，不是杂志封面，不是截图拼贴，不是默认模板页。",
+        f"这页属于：{_page_archetype_label(slide_spec['page_archetype'])}，镜头风味是：{_shot_flavor_label(slide_spec['shot_flavor'])}。",
+        "这是一张服务视频剪辑的单镜头知识内容页，不是电影海报，不是杂志封面，不是截图拼贴，不是默认模板页。",
         "除明确允许的上屏文字外，任何说明句、标签名、字段名、提示词原文都不得出现在画面里。",
     ]
     lines.extend(_shot_type_instructions(slide_spec))
+    lines.extend(_page_archetype_instructions(slide_spec))
+    lines.extend(_shot_flavor_instructions(slide_spec))
     lines.extend(_semantic_visual_instructions(slide_spec))
     if slide_spec["shot_type"] == "ppt_slide":
         lines.append(f"PPT 布局参考：{layout_map.get(slide_spec['layout_family'], '卡片式摘要布局')}")

@@ -27,6 +27,9 @@ def build_prompt_records(storyboard_path: str) -> List[Dict]:
                 "start_time": shot["start_timecode"],
                 "end_time": shot["end_timecode"],
                 "shot_type": shot["shot_type"],
+                "cognitive_action": shot["cognitive_action"],
+                "page_archetype": shot["page_archetype"],
+                "shot_flavor": shot["shot_flavor"],
                 "visual_goal": shot["visual_goal"],
                 "description": " / ".join(shot["subject_elements"][:3]),
                 "image_prompt": build_prompt(slide_spec),
@@ -47,6 +50,9 @@ def export_prompts(records: List[Dict], output_path: str) -> None:
             f.write(f"## 镜号 {record['num']}: {record['title']}\n")
             f.write(f"# 时间: {record['start_time']} - {record['end_time']}\n")
             f.write(f"# 镜头类型: {record['shot_type']}\n")
+            f.write(f"# 认知动作: {record['cognitive_action']}\n")
+            f.write(f"# 页面原型: {record['page_archetype']}\n")
+            f.write(f"# 镜头风味: {record['shot_flavor']}\n")
             f.write(f"# 视觉目标: {record['visual_goal']}\n")
             f.write(f"# 画面摘要: {record['description']}\n\n")
             f.write(record["image_prompt"] + "\n\n")
@@ -59,7 +65,7 @@ def export_csv(records: List[Dict], output_path: str) -> None:
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["镜号", "标题", "开始时间", "结束时间", "镜头类型", "视觉目标", "画面摘要", "图片生成提示词", "负面提示词"]
+            ["镜号", "标题", "开始时间", "结束时间", "镜头类型", "认知动作", "页面原型", "镜头风味", "视觉目标", "画面摘要", "图片生成提示词", "负面提示词"]
         )
         for record in records:
             writer.writerow(
@@ -69,6 +75,9 @@ def export_csv(records: List[Dict], output_path: str) -> None:
                     record["start_time"],
                     record["end_time"],
                     record["shot_type"],
+                    record["cognitive_action"],
+                    record["page_archetype"],
+                    record["shot_flavor"],
                     record["visual_goal"],
                     record["description"],
                     record["image_prompt"],
@@ -102,6 +111,9 @@ def export_comfyui_workflow(records: List[Dict], output_path: str, video_num: st
                 "shot_num": record["num"],
                 "title": record["title"],
                 "shot_type": record["shot_type"],
+                "cognitive_action": record["cognitive_action"],
+                "page_archetype": record["page_archetype"],
+                "shot_flavor": record["shot_flavor"],
                 "prompt": record["image_prompt"],
                 "negative_prompt": record["negative_prompt"],
                 "output_filename": f"video-{video_num}-image-{record['num']:02d}.png",

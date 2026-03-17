@@ -260,6 +260,9 @@ def _apply_ocr_checks(record: Dict[str, Any], slide_spec: Dict[str, Any], ocr_te
 def _apply_richness_checks(record: Dict[str, Any], slide_spec: Dict[str, Any]) -> None:
     metrics = record["metrics"]
     shot_type = slide_spec["shot_type"]
+    page_archetype = slide_spec["page_archetype"]
+    shot_flavor = slide_spec["shot_flavor"]
+    knowledge_density = slide_spec["knowledge_density"]
     density = slide_spec["style_anchor"]["density"]
 
     if shot_type in {"infographic", "comparison_frame", "process_frame", "ppt_slide"} and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
@@ -282,11 +285,27 @@ def _apply_richness_checks(record: Dict[str, Any], slide_spec: Dict[str, Any]) -
         if metrics["edge_density"] > HIGH_EDGE_DENSITY:
             record["reason_codes"].append("quote_frame_too_busy")
 
+    if page_archetype == "thesis_page" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+        record["reason_codes"].append("thesis_page_too_busy")
+    if page_archetype == "summary_page" and metrics["edge_density"] > 0.14:
+        record["reason_codes"].append("summary_page_too_busy")
+    if page_archetype == "evidence_page" and metrics["ocr_text_length"] < 4 and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
+        record["reason_codes"].append("evidence_page_too_empty")
+    if knowledge_density == "high" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
+        record["reason_codes"].append("knowledge_density_underdelivered")
+    if knowledge_density == "low" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+        record["reason_codes"].append("knowledge_density_too_busy")
+
     if density == "dense" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("density_underdelivered")
 
     if density == "sparse" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
         record["reason_codes"].append("density_too_busy")
+
+    if shot_flavor == "quiet_resolve" and metrics["edge_density"] > 0.14:
+        record["reason_codes"].append("quiet_resolve_broken")
+    if shot_flavor == "contrast_tension" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
+        record["reason_codes"].append("contrast_tension_missing")
 
 
 def _latest_attempt_record(shot_state: Dict[str, Any], attempt: int) -> Optional[Dict[str, Any]]:
@@ -348,6 +367,9 @@ def build_attempt_review(
         "shot_num": shot["shot_num"],
         "attempt": attempt,
         "shot_type": slide_spec["shot_type"],
+        "cognitive_action": slide_spec["cognitive_action"],
+        "page_archetype": slide_spec["page_archetype"],
+        "shot_flavor": slide_spec["shot_flavor"],
         "status": "retry",
         "compose_eligible": False,
         "manual_decision": "pending",

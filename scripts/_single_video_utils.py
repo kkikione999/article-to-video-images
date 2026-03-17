@@ -19,6 +19,30 @@ SHOT_TYPES = {
     "process_frame",
     "quote_frame",
 }
+COGNITIVE_ACTION_VALUES = {
+    "hook_question",
+    "define_claim",
+    "explain_mechanism",
+    "compare_contrast",
+    "show_process",
+    "show_evidence",
+    "summarize_close",
+}
+PAGE_ARCHETYPE_VALUES = {
+    "thesis_page",
+    "structure_page",
+    "comparison_page",
+    "process_page",
+    "evidence_page",
+    "summary_page",
+}
+SHOT_FLAVOR_VALUES = {
+    "steady_explainer",
+    "contrast_tension",
+    "zoom_focus",
+    "layered_depth",
+    "quiet_resolve",
+}
 TEXT_POLICY_MODES = {
     "none",
     "title_only",
@@ -52,6 +76,48 @@ COMPOSITION_KEYS = {"景别", "构图", "视角"}
 INFO_LAYER_KEYS = {"前景", "中景", "背景"}
 STYLE_ANCHOR_KEYS = {"主风格", "当前变体", "色调", "光线", "画面密度"}
 TEXT_POLICY_KEYS = {"模式", "标题", "副标题", "要点", "数据卡"}
+COGNITIVE_ACTION_ALIASES = {
+    "提问引入": "hook_question",
+    "hook_question": "hook_question",
+    "定义判断": "define_claim",
+    "define_claim": "define_claim",
+    "机制解释": "explain_mechanism",
+    "explain_mechanism": "explain_mechanism",
+    "对比判断": "compare_contrast",
+    "compare_contrast": "compare_contrast",
+    "流程推进": "show_process",
+    "show_process": "show_process",
+    "案例举证": "show_evidence",
+    "show_evidence": "show_evidence",
+    "总结收束": "summarize_close",
+    "summarize_close": "summarize_close",
+}
+PAGE_ARCHETYPE_ALIASES = {
+    "核心命题页": "thesis_page",
+    "thesis_page": "thesis_page",
+    "结构拆解页": "structure_page",
+    "structure_page": "structure_page",
+    "关系对照页": "comparison_page",
+    "comparison_page": "comparison_page",
+    "流程推进页": "process_page",
+    "process_page": "process_page",
+    "案例证据页": "evidence_page",
+    "evidence_page": "evidence_page",
+    "总结收束页": "summary_page",
+    "summary_page": "summary_page",
+}
+SHOT_FLAVOR_ALIASES = {
+    "稳态讲解": "steady_explainer",
+    "steady_explainer": "steady_explainer",
+    "冲突对照": "contrast_tension",
+    "contrast_tension": "contrast_tension",
+    "压迫聚焦": "zoom_focus",
+    "zoom_focus": "zoom_focus",
+    "层次推进": "layered_depth",
+    "layered_depth": "layered_depth",
+    "留白收束": "quiet_resolve",
+    "quiet_resolve": "quiet_resolve",
+}
 
 LEGACY_LAYOUT_COMPOSITION = {
     "CenterLayout": {"景别": "中景", "构图": "中心聚焦构图", "视角": "平视"},
@@ -90,6 +156,14 @@ SHOT_TYPE_TO_VARIANT = {
     "comparison_frame": "左右对照镜头",
     "process_frame": "流程递进镜头",
     "quote_frame": "收束金句镜头",
+}
+PAGE_ARCHETYPE_TO_DENSITY = {
+    "thesis_page": "medium",
+    "structure_page": "high",
+    "comparison_page": "high",
+    "process_page": "high",
+    "evidence_page": "high",
+    "summary_page": "low",
 }
 
 
@@ -155,6 +229,13 @@ def dedupe_preserve_order(items: List[str]) -> List[str]:
         seen.add(item)
         out.append(item)
     return out
+
+
+def _normalize_choice(value: str, aliases: Dict[str, str], field_name: str) -> str:
+    normalized = aliases.get(strip_wrapping_quotes(value), "")
+    if not normalized:
+        raise StoryboardError(f"{field_name} 不支持的取值: {value}")
+    return normalized
 
 
 def _expect_line(lines: List[str], idx: int, prefix: str) -> str:
@@ -355,6 +436,59 @@ def _parse_data_layer(lines: List[str], idx: int) -> Tuple[Dict[str, str], int]:
     return data_layer, idx
 
 
+def _keyword_haystack(*values: str) -> str:
+    return " ".join(value for value in values if value)
+
+
+def _infer_page_archetype(shot_type: str, title: str, subtitle: str, voiceover_text: str, asr_text: str) -> str:
+    haystack = _keyword_haystack(title, subtitle, voiceover_text, asr_text)
+    if shot_type == "comparison_frame" or any(token in haystack for token in ["对比", "比较", "差异", "旧", "新", "vs"]):
+        return "comparison_page"
+    if shot_type == "process_frame" or any(token in haystack for token in ["流程", "步骤", "阶段", "链路", "演进"]):
+        return "process_page"
+    if shot_type == "quote_frame" or any(token in haystack for token in ["总结", "一句话", "结论", "启发", "生产", "收束"]):
+        return "summary_page"
+    if any(token in haystack for token in ["架构", "结构", "模块", "系统", "分工", "角色", "组成"]):
+        return "structure_page"
+    if any(token in haystack for token in ["案例", "证据", "数据", "数字", "风险", "成本", "结果"]):
+        return "evidence_page"
+    if shot_type == "infographic":
+        return "structure_page"
+    if shot_type == "concept_scene":
+        return "thesis_page"
+    return "thesis_page"
+
+
+def _infer_cognitive_action(page_archetype: str, title: str, subtitle: str, voiceover_text: str, asr_text: str) -> str:
+    haystack = _keyword_haystack(title, subtitle, voiceover_text, asr_text)
+    if any(token in haystack for token in ["为什么", "有没有想过", "是否", "危险前提"]):
+        return "hook_question"
+    if page_archetype == "comparison_page":
+        return "compare_contrast"
+    if page_archetype == "process_page":
+        return "show_process"
+    if page_archetype == "evidence_page":
+        return "show_evidence"
+    if page_archetype == "summary_page":
+        return "summarize_close"
+    if any(token in haystack for token in ["原理", "机制", "如何", "为什么会", "决定"]):
+        return "explain_mechanism"
+    return "define_claim"
+
+
+def _infer_shot_flavor(shot_type: str, page_archetype: str, title: str, voiceover_text: str) -> str:
+    haystack = _keyword_haystack(title, voiceover_text)
+    if page_archetype == "summary_page":
+        return "quiet_resolve"
+    if page_archetype == "comparison_page":
+        return "contrast_tension"
+    if page_archetype == "process_page":
+        return "layered_depth"
+    if shot_type == "concept_scene" or any(token in haystack for token in ["核心", "危险", "问题", "失控"]):
+        return "zoom_focus"
+    return "steady_explainer"
+
+
 def _derive_shot_type_from_legacy(title: str, ppt: Dict[str, Any]) -> str:
     haystack = " ".join(
         [
@@ -387,6 +521,21 @@ def _upgrade_legacy_shot(
     data_layer: Dict[str, str],
 ) -> Dict[str, Any]:
     shot_type = _derive_shot_type_from_legacy(title, ppt)
+    page_archetype = _infer_page_archetype(
+        shot_type,
+        title,
+        ppt.get("副标题", ""),
+        voiceover_text,
+        asr_text,
+    )
+    cognitive_action = _infer_cognitive_action(
+        page_archetype,
+        title,
+        ppt.get("副标题", ""),
+        voiceover_text,
+        asr_text,
+    )
+    shot_flavor = _infer_shot_flavor(shot_type, page_archetype, title, voiceover_text)
     text_mode = "title_only"
     if ppt.get("数据卡"):
         text_mode = "title_plus_data"
@@ -437,6 +586,9 @@ def _upgrade_legacy_shot(
 
     return {
         "shot_type": shot_type,
+        "cognitive_action": cognitive_action,
+        "page_archetype": page_archetype,
+        "shot_flavor": shot_flavor,
         "visual_goal": visual_goal,
         "subject_elements": subject_elements[:3],
         "action_relations": action_relations[:2],
@@ -474,6 +626,30 @@ def _parse_rich_blocks(lines: List[str], idx: int) -> Tuple[Dict[str, Any], Dict
 
         if line.startswith("- **镜头类型**: "):
             payload["shot_type"] = strip_wrapping_quotes(_expect_line(lines, idx, "- **镜头类型**: "))
+            idx += 1
+            continue
+        if line.startswith("- **认知动作**: "):
+            payload["cognitive_action"] = _normalize_choice(
+                _expect_line(lines, idx, "- **认知动作**: "),
+                COGNITIVE_ACTION_ALIASES,
+                "认知动作",
+            )
+            idx += 1
+            continue
+        if line.startswith("- **页面原型**: "):
+            payload["page_archetype"] = _normalize_choice(
+                _expect_line(lines, idx, "- **页面原型**: "),
+                PAGE_ARCHETYPE_ALIASES,
+                "页面原型",
+            )
+            idx += 1
+            continue
+        if line.startswith("- **镜头风味**: "):
+            payload["shot_flavor"] = _normalize_choice(
+                _expect_line(lines, idx, "- **镜头风味**: "),
+                SHOT_FLAVOR_ALIASES,
+                "镜头风味",
+            )
             idx += 1
             continue
         if line.startswith("- **视觉目标**: "):
@@ -576,6 +752,29 @@ def _normalize_rich_payload(title: str, payload: Dict[str, Any], ppt_visual: Dic
         text_policy["数据卡"] = list(ppt_visual.get("数据卡", []))[:3]
     if text_policy["模式"] != "none" and not text_policy["标题"]:
         text_policy["标题"] = title
+    page_archetype = normalized.get("page_archetype") or _infer_page_archetype(
+        normalized["shot_type"],
+        title,
+        text_policy.get("副标题", ""),
+        normalized.get("visual_goal", ""),
+        "",
+    )
+    cognitive_action = normalized.get("cognitive_action") or _infer_cognitive_action(
+        page_archetype,
+        title,
+        text_policy.get("副标题", ""),
+        normalized.get("visual_goal", ""),
+        "",
+    )
+    shot_flavor = normalized.get("shot_flavor") or _infer_shot_flavor(
+        normalized["shot_type"],
+        page_archetype,
+        title,
+        normalized.get("visual_goal", ""),
+    )
+    normalized["page_archetype"] = page_archetype
+    normalized["cognitive_action"] = cognitive_action
+    normalized["shot_flavor"] = shot_flavor
     normalized["text_policy"] = text_policy
     normalized["ppt_visual"] = ppt_visual
     return normalized
@@ -650,6 +849,9 @@ def parse_storyboard(path: str) -> List[Dict[str, Any]]:
             "asr_text": asr_text,
             "voiceover_text": voiceover_text,
             "shot_type": rich_payload["shot_type"],
+            "cognitive_action": rich_payload["cognitive_action"],
+            "page_archetype": rich_payload["page_archetype"],
+            "shot_flavor": rich_payload["shot_flavor"],
             "visual_goal": rich_payload["visual_goal"],
             "subject_elements": rich_payload["subject_elements"],
             "action_relations": rich_payload["action_relations"],
@@ -697,7 +899,7 @@ def collect_review_keywords(source: Dict[str, Any]) -> List[str]:
     return dedupe_preserve_order([strip_wrapping_quotes(item) for item in items if item])
 
 
-def _simplify_text_policy(text_policy: Dict[str, Any], attempt: int) -> Dict[str, Any]:
+def _simplify_text_policy(text_policy: Dict[str, Any], attempt: int, page_archetype: str) -> Dict[str, Any]:
     simplified = {
         "模式": text_policy["模式"],
         "标题": text_policy.get("标题", ""),
@@ -710,6 +912,10 @@ def _simplify_text_policy(text_policy: Dict[str, Any], attempt: int) -> Dict[str
         simplified["副标题"] = ""
         simplified["要点"] = [shorten_text(item, 16) for item in simplified["要点"][:2]]
         simplified["数据卡"] = [shorten_text(item, 16) for item in simplified["数据卡"][:2]]
+        if page_archetype in {"thesis_page", "summary_page"} and simplified["模式"] != "none":
+            simplified["模式"] = "title_only"
+            simplified["数据卡"] = []
+            simplified["要点"] = []
 
     if attempt >= 3:
         simplified["要点"] = [shorten_text(item, 14) for item in simplified["要点"][:2]]
@@ -723,7 +929,11 @@ def _simplify_text_policy(text_policy: Dict[str, Any], attempt: int) -> Dict[str
 
 
 def build_slide_spec(shot: Dict[str, Any], attempt: int) -> Dict[str, Any]:
-    text_policy = _simplify_text_policy(shot["text_policy"], attempt)
+    page_archetype = shot["page_archetype"]
+    cognitive_action = shot["cognitive_action"]
+    shot_flavor = shot["shot_flavor"]
+    knowledge_density = PAGE_ARCHETYPE_TO_DENSITY[page_archetype]
+    text_policy = _simplify_text_policy(shot["text_policy"], attempt, page_archetype)
     style_anchor = dict(DEFAULT_STYLE_ANCHOR)
     style_anchor.update(shot["style_anchor"])
 
@@ -751,6 +961,10 @@ def build_slide_spec(shot: Dict[str, Any], attempt: int) -> Dict[str, Any]:
         "shot_num": shot["shot_num"],
         "shot_title": shot["title"],
         "shot_type": shot["shot_type"],
+        "cognitive_action": cognitive_action,
+        "page_archetype": page_archetype,
+        "shot_flavor": shot_flavor,
+        "knowledge_density": knowledge_density,
         "layout_family": layout,
         "visual_target": shot["visual_goal"],
         "subject_elements": subject_elements,
@@ -788,6 +1002,7 @@ def build_slide_spec(shot: Dict[str, Any], attempt: int) -> Dict[str, Any]:
         "data_layer": shot["data_layer"],
         "richness_profile": {
             "density": style_anchor["画面密度"],
+            "knowledge_density": knowledge_density,
             "requires_structure": shot["shot_type"] in {"ppt_slide", "infographic", "comparison_frame", "process_frame"},
             "requires_scene_depth": shot["shot_type"] in {"concept_scene", "comparison_frame"},
             "allow_text": text_policy["模式"] != "none",
