@@ -211,6 +211,10 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/gene
 - 自动检测 `DASHSCOPE_API_KEY` 环境变量
 - 如存在：使用阿里云 CosyVoice 生成真实语音
 - 如不存在：生成静音占位音频（按文章时长估算）
+- 可选环境变量：
+  - `DASHSCOPE_TTS_VENDOR`
+  - `DASHSCOPE_TTS_MODEL`
+  - `DASHSCOPE_TTS_VOICE_ID`
 - **重要**：直接使用 skill 脚本，不要创建副本
 
 ## 第三步：ASR语音识别
@@ -787,9 +791,15 @@ printenv | grep DASHSCOPE_API_KEY
 
 # 临时设置（当前终端会话）
 export DASHSCOPE_API_KEY="your-api-key"
+export DASHSCOPE_TTS_VENDOR="qwen"
+export DASHSCOPE_TTS_MODEL="qwen3-tts-vc-2026-01-22"
+export DASHSCOPE_TTS_VOICE_ID="qwen-tts-vc-bailian-voice-20260317224117018-3a82"
 
 # 永久设置（添加到 ~/.zshrc 或 ~/.bashrc）
 echo 'export DASHSCOPE_API_KEY="your-api-key"' >> ~/.zshrc
+echo 'export DASHSCOPE_TTS_VENDOR="qwen"' >> ~/.zshrc
+echo 'export DASHSCOPE_TTS_MODEL="qwen3-tts-vc-2026-01-22"' >> ~/.zshrc
+echo 'export DASHSCOPE_TTS_VOICE_ID="qwen-tts-vc-bailian-voice-20260317224117018-3a82"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
