@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlencode
 
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 PLACEHOLDER_RE = re.compile(r"__([A-Z0-9_]+)__")
@@ -42,6 +42,8 @@ ENV_COMFYUI_CONTROL_STRENGTH = "COMFYUI_CONTROL_STRENGTH"
 ENV_COMFYUI_IPADAPTER_WEIGHT = "COMFYUI_IPADAPTER_WEIGHT"
 ENV_COMFYUI_SAMPLER_NAME = "COMFYUI_SAMPLER_NAME"
 ENV_COMFYUI_SCHEDULER = "COMFYUI_SCHEDULER"
+ENV_COMFYUI_RENDER_TEXT_OVERLAY = "COMFYUI_RENDER_TEXT_OVERLAY"
+ENV_COMFYUI_FONT_PATH = "COMFYUI_FONT_PATH"
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8188"
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -54,6 +56,11 @@ DEFAULT_CONTROL_STRENGTH = 0.82
 DEFAULT_IPADAPTER_WEIGHT = 0.72
 DEFAULT_SAMPLER_NAME = "dpmpp_2m"
 DEFAULT_SCHEDULER = "karras"
+DEFAULT_RENDER_TEXT_OVERLAY = True
+DEFAULT_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+]
 MODEL_CHOICE_FIELDS = {
     "CheckpointLoaderSimple": ("ckpt_name", "checkpoint_name", ENV_COMFYUI_CHECKPOINT_NAME, "Checkpoint"),
     "ControlNetLoader": ("control_net_name", "controlnet_name", ENV_COMFYUI_CONTROLNET_NAME, "ControlNet"),
@@ -113,6 +120,15 @@ class ComfyUIOptions:
     ipadapter_weight: float
     sampler_name: str
     scheduler: str
+    render_text_overlay: bool
+    font_path: Optional[Path]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def resolve_comfyui_options(
@@ -146,6 +162,10 @@ def resolve_comfyui_options(
         ipadapter_weight=_env_float(ENV_COMFYUI_IPADAPTER_WEIGHT, DEFAULT_IPADAPTER_WEIGHT),
         sampler_name=os.environ.get(ENV_COMFYUI_SAMPLER_NAME, DEFAULT_SAMPLER_NAME).strip(),
         scheduler=os.environ.get(ENV_COMFYUI_SCHEDULER, DEFAULT_SCHEDULER).strip(),
+        render_text_overlay=_env_bool(ENV_COMFYUI_RENDER_TEXT_OVERLAY, DEFAULT_RENDER_TEXT_OVERLAY),
+        font_path=Path(os.environ[ENV_COMFYUI_FONT_PATH]).expanduser().resolve()
+        if os.environ.get(ENV_COMFYUI_FONT_PATH)
+        else None,
     )
 
 
@@ -367,6 +387,209 @@ def ensure_default_style_reference(path: Path = DEFAULT_STYLE_REFERENCE_PATH) ->
 
     image.save(path)
     return path
+
+
+def resolve_overlay_font_path(options: ComfyUIOptions) -> Path:
+    if options.font_path:
+        if not options.font_path.exists():
+            raise RuntimeError(f"指定的字体文件不存在: {options.font_path}")
+        return options.font_path
+    for candidate in DEFAULT_FONT_CANDIDATES:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    raise RuntimeError("未找到可用的中文字体文件，请设置 COMFYUI_FONT_PATH")
+
+
+def _load_font(font_path: Path, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(str(font_path), size=size)
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    if not text:
+        return []
+    lines: List[str] = []
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        current = ""
+        for char in paragraph:
+            trial = current + char
+            if not current or draw.textlength(trial, font=font) <= max_width:
+                current = trial
+                continue
+            lines.append(current)
+            current = char
+        if current:
+            lines.append(current)
+    return lines or [text]
+
+
+def _fit_wrapped_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font_path: Path,
+    max_width: int,
+    max_lines: int,
+    max_size: int,
+    min_size: int,
+) -> Tuple[ImageFont.FreeTypeFont, List[str]]:
+    for size in range(max_size, min_size - 1, -2):
+        font = _load_font(font_path, size)
+        lines = _wrap_text(draw, text, font, max_width)
+        if len(lines) <= max_lines:
+            return font, lines
+    font = _load_font(font_path, min_size)
+    lines = _wrap_text(draw, text, font, max_width)[:max_lines]
+    return font, lines
+
+
+def _draw_text_block(
+    draw: ImageDraw.ImageDraw,
+    box: Tuple[int, int, int, int],
+    text_lines: List[str],
+    font: ImageFont.FreeTypeFont,
+    fill: Tuple[int, int, int, int],
+    line_gap: int = 10,
+) -> None:
+    x1, y1, x2, y2 = box
+    y = y1
+    for line in text_lines:
+        if y >= y2:
+            break
+        draw.text((x1, y), line, font=font, fill=fill)
+        bbox = draw.textbbox((x1, y), line, font=font)
+        y = bbox[3] + line_gap
+
+
+def _draw_panel(
+    draw: ImageDraw.ImageDraw,
+    box: Tuple[int, int, int, int],
+    fill: Tuple[int, int, int, int],
+    outline: Tuple[int, int, int, int],
+    width: int = 3,
+    radius: int = 26,
+) -> None:
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+
+
+def apply_text_overlay(image_path: Path, slide_spec: Dict[str, Any], options: ComfyUIOptions) -> None:
+    if not options.render_text_overlay:
+        return
+    text_policy = slide_spec["text_policy"]
+    if text_policy["mode"] == "none":
+        return
+
+    font_path = resolve_overlay_font_path(options)
+    image = Image.open(image_path).convert("RGBA")
+    width, height = image.size
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    ink = (244, 246, 248, 255)
+    panel_fill = (7, 16, 26, 190)
+    panel_light = (11, 24, 38, 176)
+    outline = (100, 185, 176, 220)
+    accent = (232, 140, 87, 255)
+
+    title = text_policy["title"] or slide_spec["shot_title"]
+    subtitle = text_policy["subtitle"]
+    bullets = list(text_policy["bullets"] or [])
+    data_cards = list(text_policy["data_cards"] or [])
+    layout = slide_spec["layout_family"]
+
+    if text_policy["mode"] == "quote_only":
+        card = (width // 2 - int(width * 0.26), height // 2 - 120, width // 2 + int(width * 0.26), height // 2 + 120)
+        _draw_panel(draw, card, panel_fill, outline, width=4, radius=30)
+        font, lines = _fit_wrapped_text(draw, title, font_path, card[2] - card[0] - 72, 3, 46, 26)
+        _draw_text_block(draw, (card[0] + 36, card[1] + 40, card[2] - 36, card[3] - 36), lines, font, ink, line_gap=14)
+        image.alpha_composite(overlay)
+        image.convert("RGB").save(image_path)
+        return
+
+    header = (60, 48, width - 60, 172 if subtitle else 148)
+    _draw_panel(draw, header, panel_fill, outline, width=4, radius=28)
+    title_font, title_lines = _fit_wrapped_text(draw, title, font_path, header[2] - header[0] - 40, 2, 40, 24)
+    _draw_text_block(draw, (header[0] + 24, header[1] + 18, header[2] - 24, header[3] - 18), title_lines, title_font, ink, line_gap=8)
+    if subtitle:
+        sub_font, sub_lines = _fit_wrapped_text(draw, subtitle, font_path, header[2] - header[0] - 40, 2, 24, 16)
+        title_block_height = draw.textbbox((0, 0), title_lines[-1], font=title_font)[3]
+        _draw_text_block(
+            draw,
+            (header[0] + 24, header[1] + 24 + title_block_height + 12, header[2] - 24, header[3] - 18),
+            sub_lines,
+            sub_font,
+            (215, 226, 232, 255),
+            line_gap=6,
+        )
+
+    if text_policy["mode"] == "title_only":
+        image.alpha_composite(overlay)
+        image.convert("RGB").save(image_path)
+        return
+
+    if layout in {"SplitLayout", "CardLayout"}:
+        body = (60, 198, int(width * 0.38), height - 56)
+        _draw_panel(draw, body, panel_light, outline, width=3, radius=26)
+        lines = bullets if bullets else data_cards
+        body_font, body_lines = _fit_wrapped_text(
+            draw,
+            "\n".join(f"- {line}" for line in lines[:4]),
+            font_path,
+            body[2] - body[0] - 40,
+            8,
+            26,
+            18,
+        )
+        _draw_text_block(draw, (body[0] + 20, body[1] + 20, body[2] - 20, body[3] - 20), body_lines, body_font, ink, line_gap=10)
+    elif layout == "CenterLayout":
+        left = (56, height - 208, int(width * 0.34), height - 56)
+        _draw_panel(draw, left, panel_light, outline, width=3, radius=24)
+        left_lines = bullets[:3] if bullets else [title]
+        left_font, left_wrapped = _fit_wrapped_text(draw, "\n".join(f"- {line}" for line in left_lines), font_path, left[2] - left[0] - 32, 6, 24, 16)
+        _draw_text_block(draw, (left[0] + 16, left[1] + 18, left[2] - 16, left[3] - 16), left_wrapped, left_font, ink, line_gap=8)
+        if data_cards:
+            right = (width - int(width * 0.3), height - 208, width - 56, height - 56)
+            _draw_panel(draw, right, panel_light, outline, width=3, radius=24)
+            right_font, right_wrapped = _fit_wrapped_text(
+                draw,
+                "\n".join(f"- {line}" for line in data_cards[:3]),
+                font_path,
+                right[2] - right[0] - 32,
+                6,
+                24,
+                16,
+            )
+            _draw_text_block(draw, (right[0] + 16, right[1] + 18, right[2] - 16, right[3] - 16), right_wrapped, right_font, ink, line_gap=8)
+    elif layout == "TripleLayout":
+        segments = bullets[:3] if bullets else data_cards[:3]
+        gap = 18
+        w = (width - 60 * 2 - gap * 2) // 3
+        y1, y2 = height - 182, height - 56
+        for idx in range(min(3, len(segments))):
+            x1 = 60 + idx * (w + gap)
+            box = (x1, y1, x1 + w, y2)
+            _draw_panel(draw, box, panel_light, outline if idx != 1 else accent, width=3, radius=22)
+            font, wrapped = _fit_wrapped_text(draw, segments[idx], font_path, w - 28, 4, 22, 15)
+            _draw_text_block(draw, (x1 + 14, y1 + 16, x1 + w - 14, y2 - 14), wrapped, font, ink, line_gap=6)
+    else:
+        footer = (60, height - 172, width - 60, height - 48)
+        _draw_panel(draw, footer, panel_light, outline, width=3, radius=24)
+        merged = bullets[:4] if bullets else data_cards[:4]
+        footer_font, footer_lines = _fit_wrapped_text(
+            draw,
+            "  ".join(f"- {line}" for line in merged),
+            font_path,
+            footer[2] - footer[0] - 40,
+            4,
+            24,
+            16,
+        )
+        _draw_text_block(draw, (footer[0] + 20, footer[1] + 18, footer[2] - 20, footer[3] - 18), footer_lines, footer_font, ink, line_gap=8)
+
+    image.alpha_composite(overlay)
+    image.convert("RGB").save(image_path)
 
 
 def _load_workflow_template(path: Path) -> Dict[str, Any]:

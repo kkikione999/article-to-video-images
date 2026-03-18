@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from _single_video_utils import (
     safe_json_dump,
 )
 from comfyui_workflow import (
+    apply_text_overlay,
     execute_comfyui_workflow,
     prepare_comfyui_workflow,
     resolve_comfyui_options,
@@ -376,6 +378,21 @@ def build_negative_prompt(slide_spec: Dict[str, Any]) -> str:
     )
 
 
+def build_generation_slide_spec(slide_spec: Dict[str, Any], provider: str, suppress_text: bool) -> Dict[str, Any]:
+    if provider != "comfyui" or not suppress_text:
+        return slide_spec
+    generated = copy.deepcopy(slide_spec)
+    generated["text_policy"] = {
+        "mode": "none",
+        "title": "",
+        "subtitle": "",
+        "bullets": [],
+        "data_cards": [],
+    }
+    generated["expected_text_phrases"] = []
+    return generated
+
+
 def attempt_dir(output_dir: Path, shot_num: int) -> Path:
     return output_dir / "attempts" / f"shot-{shot_num:02d}"
 
@@ -454,8 +471,24 @@ def generate_attempt(
             "response_path": str(response_path),
         }
 
-    prompt = build_prompt(slide_spec)
-    negative_prompt = build_negative_prompt(slide_spec)
+    comfyui_options = None
+    suppress_generated_text = False
+    if provider == "comfyui":
+        comfyui_options = resolve_comfyui_options(
+            base_url=comfyui_base_url,
+            workflow_template=comfyui_workflow,
+            style_image=comfyui_style_image,
+            timeout_seconds=comfyui_timeout,
+        )
+        suppress_generated_text = comfyui_options.render_text_overlay
+
+    generation_slide_spec = build_generation_slide_spec(
+        slide_spec,
+        provider=provider,
+        suppress_text=suppress_generated_text,
+    )
+    prompt = build_prompt(generation_slide_spec)
+    negative_prompt = build_negative_prompt(generation_slide_spec)
     prompt_path.write_text(prompt, encoding="utf-8")
 
     request_payload = {
@@ -465,24 +498,20 @@ def generate_attempt(
         "model": model,
         "semantic_attempt": True,
         "slide_spec": slide_spec,
+        "generation_slide_spec": generation_slide_spec,
+        "suppress_generated_text": suppress_generated_text,
         "negative_prompt": negative_prompt,
     }
     if provider == "comfyui":
         try:
-            options = resolve_comfyui_options(
-                base_url=comfyui_base_url,
-                workflow_template=comfyui_workflow,
-                style_image=comfyui_style_image,
-                timeout_seconds=comfyui_timeout,
-            )
             prepared = prepare_comfyui_workflow(
-                slide_spec=slide_spec,
+                slide_spec=generation_slide_spec,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 shot_num=shot_num,
                 attempt=attempt,
                 output_dir=output_dir,
-                options=options,
+                options=comfyui_options,
             )
             request_payload.update(
                 {
@@ -503,6 +532,8 @@ def generate_attempt(
                 output_image_path=png_path,
                 response_path=response_path,
             )
+            if comfyui_options and comfyui_options.render_text_overlay:
+                apply_text_overlay(png_path, slide_spec, comfyui_options)
             return {
                 "shot_num": shot_num,
                 "attempt": attempt,

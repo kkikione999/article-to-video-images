@@ -51,6 +51,8 @@ Optional environment variables:
 - `COMFYUI_WORKFLOW_TEMPLATE`
 - `COMFYUI_STYLE_IMAGE`
 - `COMFYUI_TIMEOUT_SECONDS`
+- `COMFYUI_RENDER_TEXT_OVERLAY`
+- `COMFYUI_FONT_PATH`
 - `COMFYUI_WIDTH`
 - `COMFYUI_HEIGHT`
 - `COMFYUI_STEPS`
@@ -60,3 +62,10 @@ Optional environment variables:
 - `COMFYUI_IPADAPTER_WEIGHT`
 - `COMFYUI_SAMPLER_NAME`
 - `COMFYUI_SCHEDULER`
+
+Recommended for local Mac runs:
+
+- keep image generation focused on background / structure
+- enable `COMFYUI_RENDER_TEXT_OVERLAY=1`
+- use a Chinese-capable font via `COMFYUI_FONT_PATH`
+- prefer a lighter local profile such as SD1.5 for throughput, then let the skill render title and bullets after generation

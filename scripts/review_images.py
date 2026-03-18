@@ -53,6 +53,21 @@ PROMPT_LEAK_MARKERS = [
 ]
 
 
+def _attempt_request_path(output_dir: Path, shot_num: int, attempt: int) -> Path:
+    return output_dir / "attempts" / f"shot-{shot_num:02d}" / f"attempt-{attempt:02d}.request.json"
+
+
+def load_attempt_request(output_dir: Path, shot_num: int, attempt: int) -> Dict[str, Any]:
+    return safe_json_load(_attempt_request_path(output_dir, shot_num, attempt), default={}) or {}
+
+
+def is_local_overlay_attempt(attempt_request: Dict[str, Any]) -> bool:
+    return (
+        attempt_request.get("provider") == "comfyui"
+        and bool(attempt_request.get("suppress_generated_text"))
+    )
+
+
 def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
     if obj is None:
         return default
@@ -224,10 +239,16 @@ def _apply_basic_image_checks(record: Dict[str, Any]) -> None:
         record["reason_codes"].append("too_bright")
 
 
-def _apply_ocr_checks(record: Dict[str, Any], slide_spec: Dict[str, Any], ocr_text: str) -> None:
+def _apply_ocr_checks(
+    record: Dict[str, Any],
+    slide_spec: Dict[str, Any],
+    ocr_text: str,
+    attempt_request: Optional[Dict[str, Any]] = None,
+) -> None:
     normalized_ocr = normalize_for_match(ocr_text)
     expected_phrases = slide_spec["expected_text_phrases"]
     text_mode = slide_spec["text_policy"]["mode"]
+    local_overlay = is_local_overlay_attempt(attempt_request or {})
     leaked_markers = [
         marker
         for marker in PROMPT_LEAK_MARKERS
@@ -244,6 +265,10 @@ def _apply_ocr_checks(record: Dict[str, Any], slide_spec: Dict[str, Any], ocr_te
         record["metrics"]["ocr_keyword_match_ratio"] = ratio_score
         title_match = normalize_for_match(expected_phrases[0]) in normalized_ocr
         threshold = OCR_MATCH_THRESHOLD_MINIMAL if text_mode in {"title_only", "quote_only"} else OCR_MATCH_THRESHOLD
+        if local_overlay:
+            visible_overlay_text = len(normalized_ocr) >= 8
+            title_match = title_match or visible_overlay_text
+            threshold = 0.0 if visible_overlay_text else min(threshold, 0.15)
         if not title_match or ratio_score < threshold:
             record["reason_codes"].append("ocr_low_confidence")
     else:
@@ -257,13 +282,21 @@ def _apply_ocr_checks(record: Dict[str, Any], slide_spec: Dict[str, Any], ocr_te
         record["reason_codes"].append("text_overload")
 
 
-def _apply_richness_checks(record: Dict[str, Any], slide_spec: Dict[str, Any]) -> None:
+def _apply_richness_checks(
+    record: Dict[str, Any],
+    slide_spec: Dict[str, Any],
+    attempt_request: Optional[Dict[str, Any]] = None,
+) -> None:
     metrics = record["metrics"]
     shot_type = slide_spec["shot_type"]
     page_archetype = slide_spec["page_archetype"]
     shot_flavor = slide_spec["shot_flavor"]
     knowledge_density = slide_spec["knowledge_density"]
     density = slide_spec["style_anchor"]["density"]
+    local_overlay = is_local_overlay_attempt(attempt_request or {})
+    busy_threshold = 0.34 if local_overlay else HIGH_EDGE_DENSITY
+    summary_busy_threshold = 0.34 if local_overlay else 0.14
+    quiet_threshold = 0.34 if local_overlay else 0.14
 
     if shot_type in {"infographic", "comparison_frame", "process_frame", "ppt_slide"} and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("structure_too_flat")
@@ -282,27 +315,27 @@ def _apply_richness_checks(record: Dict[str, Any], slide_spec: Dict[str, Any]) -
             record["reason_codes"].append("scene_depth_low")
 
     if shot_type == "quote_frame":
-        if metrics["edge_density"] > HIGH_EDGE_DENSITY:
+        if metrics["edge_density"] > busy_threshold:
             record["reason_codes"].append("quote_frame_too_busy")
 
-    if page_archetype == "thesis_page" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+    if page_archetype == "thesis_page" and metrics["edge_density"] > busy_threshold:
         record["reason_codes"].append("thesis_page_too_busy")
-    if page_archetype == "summary_page" and metrics["edge_density"] > 0.14:
+    if page_archetype == "summary_page" and metrics["edge_density"] > summary_busy_threshold:
         record["reason_codes"].append("summary_page_too_busy")
     if page_archetype == "evidence_page" and metrics["ocr_text_length"] < 4 and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("evidence_page_too_empty")
     if knowledge_density == "high" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("knowledge_density_underdelivered")
-    if knowledge_density == "low" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+    if knowledge_density == "low" and metrics["edge_density"] > busy_threshold:
         record["reason_codes"].append("knowledge_density_too_busy")
 
     if density == "dense" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("density_underdelivered")
 
-    if density == "sparse" and metrics["edge_density"] > HIGH_EDGE_DENSITY:
+    if density == "sparse" and metrics["edge_density"] > busy_threshold:
         record["reason_codes"].append("density_too_busy")
 
-    if shot_flavor == "quiet_resolve" and metrics["edge_density"] > 0.14:
+    if shot_flavor == "quiet_resolve" and metrics["edge_density"] > quiet_threshold:
         record["reason_codes"].append("quiet_resolve_broken")
     if shot_flavor == "contrast_tension" and metrics["edge_density"] < MEDIUM_EDGE_DENSITY:
         record["reason_codes"].append("contrast_tension_missing")
@@ -362,6 +395,7 @@ def build_attempt_review(
     stem = f"attempt-{attempt:02d}"
     image_path = shot_dir / f"{stem}.png"
     review_path = shot_dir / f"{stem}.review.json"
+    attempt_request = load_attempt_request(output_dir, shot["shot_num"], attempt)
 
     base = {
         "shot_num": shot["shot_num"],
@@ -377,6 +411,8 @@ def build_attempt_review(
         "reason_codes": [],
         "metrics": {},
         "ocr_text": "",
+        "provider": attempt_request.get("provider"),
+        "suppress_generated_text": bool(attempt_request.get("suppress_generated_text")),
         "review_path": str(review_path),
     }
 
@@ -392,12 +428,12 @@ def build_attempt_review(
     try:
         ocr_text = extract_ocr_text(image_path)
         base["ocr_text"] = ocr_text
-        _apply_ocr_checks(base, slide_spec, ocr_text)
+        _apply_ocr_checks(base, slide_spec, ocr_text, attempt_request=attempt_request)
     except Exception as exc:
         base["reason_codes"].append("ocr_api_unavailable")
         base["ocr_text"] = str(exc)
 
-    _apply_richness_checks(base, slide_spec)
+    _apply_richness_checks(base, slide_spec, attempt_request=attempt_request)
     return _finalize_attempt_record(base, attempt, max_attempts)
 
 

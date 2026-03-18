@@ -548,8 +548,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/gene
 说明：
 1. skill 会先为每个镜头自动生成一张 `layout guide`，作为 ControlNet 输入，稳定知识页镜头结构。
 2. 如未显式提供 `COMFYUI_STYLE_IMAGE`，skill 会自动生成一张默认风格参考图，作为 IPAdapter 输入。
-3. 如果你的 ComfyUI 图里使用的节点类型或输入名与示例模板不同，请从 ComfyUI 导出你自己的 API workflow JSON，并用 `COMFYUI_WORKFLOW_TEMPLATE` 指向它。
-4. `check_comfyui_setup.py` 会检查 workflow 所需节点是否存在，以及 checkpoint / controlnet / clip vision / ipadapter 对应的模型列表是否为空。
+3. 对于本地 ComfyUI provider，skill 默认会启用 `COMFYUI_RENDER_TEXT_OVERLAY=1`，即先生成无字背景，再用程序稳定叠加标题/要点，避免本地模型直接生成中文乱码。
+4. 如果你的 ComfyUI 图里使用的节点类型或输入名与示例模板不同，请从 ComfyUI 导出你自己的 API workflow JSON，并用 `COMFYUI_WORKFLOW_TEMPLATE` 指向它。
+5. `check_comfyui_setup.py` 会检查 workflow 所需节点是否存在，以及 checkpoint / controlnet / clip vision / ipadapter 对应的模型列表是否为空。
 
 ### 5.3 图片命名规则
 
@@ -828,6 +829,8 @@ export COMFYUI_STYLE_IMAGE="/abs/path/to/your/style-reference.png"
 export COMFYUI_TIMEOUT_SECONDS="900"
 export COMFYUI_CONTROL_STRENGTH="0.82"
 export COMFYUI_IPADAPTER_WEIGHT="0.72"
+export COMFYUI_RENDER_TEXT_OVERLAY="1"
+export COMFYUI_FONT_PATH="/System/Library/Fonts/Hiragino Sans GB.ttc"
 ```
 
 ### 安装依赖
