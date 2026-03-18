@@ -3,6 +3,10 @@
 This folder contains the default API-format workflow template used by the
 `article-to-video-images` skill when `ARTICLE_TO_VIDEO_IMAGE_PROVIDER=comfyui`.
 
+Before running image generation, validate the local ComfyUI instance with:
+
+`python3 "$CODEX_HOME/skills/article-to-video-images/scripts/check_comfyui_setup.py"`
+
 Files:
 
 - `controlnet_ipadapter_api.example.json`

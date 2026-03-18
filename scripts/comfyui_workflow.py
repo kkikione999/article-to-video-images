@@ -54,6 +54,14 @@ DEFAULT_CONTROL_STRENGTH = 0.82
 DEFAULT_IPADAPTER_WEIGHT = 0.72
 DEFAULT_SAMPLER_NAME = "dpmpp_2m"
 DEFAULT_SCHEDULER = "karras"
+MODEL_CHOICE_FIELDS = {
+    "CheckpointLoaderSimple": ("ckpt_name", "checkpoint_name", ENV_COMFYUI_CHECKPOINT_NAME, "Checkpoint"),
+    "ControlNetLoader": ("control_net_name", "controlnet_name", ENV_COMFYUI_CONTROLNET_NAME, "ControlNet"),
+    "CLIPVisionLoader": ("clip_name", "clip_vision_model", ENV_COMFYUI_CLIP_VISION_MODEL, "CLIP Vision"),
+    "IPAdapterModelLoader": ("ipadapter_file", "ipadapter_model", ENV_COMFYUI_IPADAPTER_MODEL, "IPAdapter"),
+    "StyleModelLoader": ("style_model_name", None, None, "Style Model"),
+    "PhotoMakerLoader": ("photomaker_model_name", None, None, "PhotoMaker"),
+}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -404,6 +412,102 @@ def _collect_unresolved_tokens(value: Any, found: Optional[set] = None) -> set:
         for match in PLACEHOLDER_RE.findall(value):
             tokens.add(f"__{match}__")
     return tokens
+
+
+def _collect_class_types(workflow: Dict[str, Any]) -> List[str]:
+    class_types = []
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type", "")).strip()
+        if class_type and class_type not in class_types:
+            class_types.append(class_type)
+    return class_types
+
+
+def fetch_comfyui_object_info(base_url: str) -> Dict[str, Any]:
+    response = requests.get(f"{base_url}/object_info", timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def _extract_combo_options(node_info: Dict[str, Any], field_name: str) -> List[str]:
+    required = ((node_info or {}).get("input") or {}).get("required") or {}
+    raw = required.get(field_name)
+    if not raw:
+        return []
+    if isinstance(raw, list) and raw:
+        first = raw[0]
+        if isinstance(first, list):
+            return [str(item) for item in first]
+        if first == "COMBO" and len(raw) > 1 and isinstance(raw[1], dict):
+            return [str(item) for item in (raw[1].get("options") or [])]
+    return []
+
+
+def inspect_comfyui_setup(
+    options: ComfyUIOptions,
+    workflow: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    system_stats = check_comfyui_server(options)
+    object_info = fetch_comfyui_object_info(options.base_url)
+    class_types = _collect_class_types(workflow or _load_workflow_template(options.workflow_template))
+
+    missing_nodes: List[str] = []
+    findings: List[str] = []
+    choice_counts: Dict[str, Dict[str, Any]] = {}
+
+    for class_type in class_types:
+        if class_type not in object_info:
+            missing_nodes.append(class_type)
+
+    for class_type, (field_name, option_attr, env_name, label) in MODEL_CHOICE_FIELDS.items():
+        if class_type not in class_types:
+            continue
+        node_info = object_info.get(class_type)
+        if not node_info:
+            continue
+        choices = _extract_combo_options(node_info, field_name)
+        choice_counts[class_type] = {
+            "field": field_name,
+            "label": label,
+            "count": len(choices),
+            "choices": choices,
+        }
+        if not choices:
+            findings.append(f"{label} 模型列表为空: {class_type}.{field_name}")
+            continue
+        if option_attr:
+            configured = getattr(options, option_attr, "")
+            if not configured:
+                findings.append(f"未设置 {env_name}")
+            elif configured not in choices:
+                findings.append(f"{env_name}={configured} 不在 ComfyUI 可用列表中")
+
+    if missing_nodes:
+        findings.append("缺少 workflow 所需节点: " + ", ".join(missing_nodes))
+
+    return {
+        "base_url": options.base_url,
+        "workflow_template": str(options.workflow_template),
+        "class_types": class_types,
+        "system_stats": system_stats,
+        "object_info": object_info,
+        "missing_nodes": missing_nodes,
+        "choice_counts": choice_counts,
+        "findings": findings,
+    }
+
+
+def validate_comfyui_setup(
+    options: ComfyUIOptions,
+    workflow: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    report = inspect_comfyui_setup(options, workflow=workflow)
+    if report["findings"]:
+        message = "\n".join(f"- {item}" for item in report["findings"])
+        raise RuntimeError(f"ComfyUI 环境校验失败:\n{message}")
+    return report
 
 
 def prepare_comfyui_workflow(

@@ -522,6 +522,9 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/expo
 如果使用 ComfyUI + ControlNet/IPAdapter 进行批量图片生成：
 
 ```bash
+# 0) 先检查 ComfyUI 环境是否齐备
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/check_comfyui_setup.py"
+
 # 1) 先导出每镜的布局控制图 + materialized workflow
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_comfyui_workflow.py" \
   04-storyboard/storyboard-1.md \
@@ -546,6 +549,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/gene
 1. skill 会先为每个镜头自动生成一张 `layout guide`，作为 ControlNet 输入，稳定知识页镜头结构。
 2. 如未显式提供 `COMFYUI_STYLE_IMAGE`，skill 会自动生成一张默认风格参考图，作为 IPAdapter 输入。
 3. 如果你的 ComfyUI 图里使用的节点类型或输入名与示例模板不同，请从 ComfyUI 导出你自己的 API workflow JSON，并用 `COMFYUI_WORKFLOW_TEMPLATE` 指向它。
+4. `check_comfyui_setup.py` 会检查 workflow 所需节点是否存在，以及 checkpoint / controlnet / clip vision / ipadapter 对应的模型列表是否为空。
 
 ### 5.3 图片命名规则
 

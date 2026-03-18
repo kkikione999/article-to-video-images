@@ -20,10 +20,10 @@ from _single_video_utils import (
     safe_json_dump,
 )
 from comfyui_workflow import (
-    check_comfyui_server,
     execute_comfyui_workflow,
     prepare_comfyui_workflow,
     resolve_comfyui_options,
+    validate_comfyui_setup,
 )
 
 SIZE_PLAN = ["1792*1008", "1664*928", "1280*720"]
@@ -603,7 +603,7 @@ def generate_images_for_storyboard(
     if resolved_provider == "dashscope":
         ensure_api_key()
     else:
-        check_comfyui_server(
+        validate_comfyui_setup(
             resolve_comfyui_options(
                 base_url=comfyui_base_url,
                 workflow_template=comfyui_workflow,
@@ -680,9 +680,15 @@ def main() -> None:
         comfyui_timeout=args.comfyui_timeout,
         force=args.force,
     )
-    print(
-        f"✅ 已完成 attempt {args.attempt}，provider={payload['provider']}，共处理 {len(payload['results'])} 个镜头"
-    )
+    error_count = sum(1 for item in payload["results"] if item.get("status") == "error")
+    total = len(payload["results"])
+    if error_count:
+        print(
+            f"⚠️ attempt {args.attempt} 结束，provider={payload['provider']}，"
+            f"共处理 {total} 个镜头，失败 {error_count} 个"
+        )
+        raise SystemExit(1)
+    print(f"✅ 已完成 attempt {args.attempt}，provider={payload['provider']}，共处理 {total} 个镜头")
 
 
 if __name__ == "__main__":
