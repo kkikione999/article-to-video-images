@@ -474,9 +474,9 @@ ASR识别结果 (03-asr/asr-result-*.json)
 
 **当前安装包状态**：
 - 已包含：`export_prompts.py`
-- 已包含：`generate_images.py`、`review_images.py`
-- 未包含：`generate_comfyui_workflow.py`
-- 这意味着方式 A 和 B 可以直接使用，方式 C 仍需要后续补齐脚本
+- 已包含：`generate_images.py`、`review_images.py`、`generate_comfyui_workflow.py`
+- `generate_images.py` 现在支持 `dashscope` 与 `comfyui` 两种 provider
+- 方式 A、B、C 都可以直接使用
 
 #### 方式A：使用 AI 图像生成 API
 
@@ -487,7 +487,8 @@ ASR识别结果 (03-asr/asr-result-*.json)
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_images.py" \
   04-storyboard/storyboard-1.md \
   -o 05-images/video-1 \
-  --attempt 1
+  --attempt 1 \
+  --provider dashscope
 ```
 
 默认模型为 `qwen-image-2.0`。如果你的账号具备更高额度，也可以显式指定其他阿里云模型，例如：
@@ -518,14 +519,33 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/expo
 
 #### 方式C：使用 ComfyUI 工作流
 
-如果使用 ComfyUI 进行批量图片生成：
+如果使用 ComfyUI + ControlNet/IPAdapter 进行批量图片生成：
 
 ```bash
-# 生成 ComfyUI 批量处理工作流
+# 1) 先导出每镜的布局控制图 + materialized workflow
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_comfyui_workflow.py" \
-  04-storyboard/ \
-  -o comfyui_workflow.json
+  04-storyboard/storyboard-1.md \
+  -o 05-images/video-1
+
+# 2) 直接通过 ComfyUI API 执行图片生成
+ARTICLE_TO_VIDEO_IMAGE_PROVIDER=comfyui \
+COMFYUI_BASE_URL=http://127.0.0.1:8188 \
+COMFYUI_WORKFLOW_TEMPLATE="${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/templates/comfyui/controlnet_ipadapter_api.example.json" \
+COMFYUI_CHECKPOINT_NAME="your-checkpoint.safetensors" \
+COMFYUI_CONTROLNET_NAME="your-controlnet.safetensors" \
+COMFYUI_IPADAPTER_MODEL="ip-adapter-plus_sdxl_vit-h.safetensors" \
+COMFYUI_CLIP_VISION_MODEL="CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors" \
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_images.py" \
+  04-storyboard/storyboard-1.md \
+  -o 05-images/video-1 \
+  --attempt 1 \
+  --provider comfyui
 ```
+
+说明：
+1. skill 会先为每个镜头自动生成一张 `layout guide`，作为 ControlNet 输入，稳定知识页镜头结构。
+2. 如未显式提供 `COMFYUI_STYLE_IMAGE`，skill 会自动生成一张默认风格参考图，作为 IPAdapter 输入。
+3. 如果你的 ComfyUI 图里使用的节点类型或输入名与示例模板不同，请从 ComfyUI 导出你自己的 API workflow JSON，并用 `COMFYUI_WORKFLOW_TEMPLATE` 指向它。
 
 ### 5.3 图片命名规则
 
@@ -702,7 +722,22 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/asr_
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_images.py" \
   04-storyboard/storyboard-1.md \
   -o 05-images/video-1 \
-  --attempt 1
+  --attempt 1 \
+  --provider dashscope
+
+# 或者切到 ComfyUI provider
+ARTICLE_TO_VIDEO_IMAGE_PROVIDER=comfyui \
+COMFYUI_BASE_URL=http://127.0.0.1:8188 \
+COMFYUI_WORKFLOW_TEMPLATE="${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/templates/comfyui/controlnet_ipadapter_api.example.json" \
+COMFYUI_CHECKPOINT_NAME="your-checkpoint.safetensors" \
+COMFYUI_CONTROLNET_NAME="your-controlnet.safetensors" \
+COMFYUI_IPADAPTER_MODEL="ip-adapter-plus_sdxl_vit-h.safetensors" \
+COMFYUI_CLIP_VISION_MODEL="CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors" \
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/generate_images.py" \
+  04-storyboard/storyboard-1.md \
+  -o 05-images/video-1 \
+  --attempt 1 \
+  --provider comfyui
 
 # 步骤5.1：图片审核
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/scripts/review_images.py" \
@@ -773,6 +808,24 @@ source ~/.zshrc
 3. **DALL-E** - OpenAI 图像生成 API
 4. **Stable Diffusion** - 本地或云端部署
 
+**ComfyUI provider 推荐环境变量**：
+
+```bash
+export ARTICLE_TO_VIDEO_IMAGE_PROVIDER="comfyui"
+export COMFYUI_BASE_URL="http://127.0.0.1:8188"
+export COMFYUI_WORKFLOW_TEMPLATE="${CODEX_HOME:-$HOME/.codex}/skills/article-to-video-images/templates/comfyui/controlnet_ipadapter_api.example.json"
+export COMFYUI_CHECKPOINT_NAME="your-checkpoint.safetensors"
+export COMFYUI_CONTROLNET_NAME="your-controlnet.safetensors"
+export COMFYUI_IPADAPTER_MODEL="ip-adapter-plus_sdxl_vit-h.safetensors"
+export COMFYUI_CLIP_VISION_MODEL="CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+
+# 可选
+export COMFYUI_STYLE_IMAGE="/abs/path/to/your/style-reference.png"
+export COMFYUI_TIMEOUT_SECONDS="900"
+export COMFYUI_CONTROL_STRENGTH="0.82"
+export COMFYUI_IPADAPTER_WEIGHT="0.72"
+```
+
 ### 安装依赖
 
 **Python 依赖**：
@@ -786,6 +839,9 @@ pip install Pillow
 
 # 安装其他依赖
 pip install pyyaml
+
+# 使用 ComfyUI provider 时还需要 requests
+pip install requests
 ```
 
 **FFmpeg（必需）**：

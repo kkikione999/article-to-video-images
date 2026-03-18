@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Orchestrate the single-video Aliyun slide-image pipeline."""
+"""Orchestrate the single-video image pipeline with pluggable generators."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from calibrate_subtitles import calibrate_subtitles
 from generate_subtitles import generate_subtitles
 from generate_images import generate_images_for_storyboard
 from review_images import parse_manual_degraded, review_images_for_attempt
+
+ENV_IMAGE_PROVIDER = "ARTICLE_TO_VIDEO_IMAGE_PROVIDER"
 
 
 def write_run_status(run_dir: Path, **fields) -> Dict:
@@ -46,11 +49,21 @@ def selected_modes(images_dir: Path) -> List[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="运行单视频阿里云生图流程")
+    parser = argparse.ArgumentParser(description="运行单视频图片驱动视频流程")
     parser.add_argument("--run-dir", required=True, help="运行目录")
     parser.add_argument("--analysis", required=True, help="单篇分析稿路径")
     parser.add_argument("--storyboard", required=True, help="单篇分镜稿路径")
     parser.add_argument("--model", default="qwen-image-2.0", help="图片模型")
+    parser.add_argument(
+        "--image-provider",
+        default=os.environ.get(ENV_IMAGE_PROVIDER, "dashscope"),
+        choices=["dashscope", "comfyui"],
+        help="图片生成 provider",
+    )
+    parser.add_argument("--comfyui-base-url", help="ComfyUI 服务地址")
+    parser.add_argument("--comfyui-workflow", help="ComfyUI API workflow 模板路径")
+    parser.add_argument("--comfyui-style-image", help="可选：IPAdapter 参考图路径")
+    parser.add_argument("--comfyui-timeout", type=int, help="ComfyUI 单镜头超时时间（秒）")
     parser.add_argument("--max-attempts", type=int, default=3, help="最大语义 attempt 数")
     parser.add_argument("--manual-degraded", help="人工降级选择，例如 3:2,5:1")
     parser.add_argument("--force-images", action="store_true", help="覆盖既有图片尝试产物")
@@ -137,6 +150,11 @@ def main() -> None:
             attempt=attempt,
             shot_numbers=unresolved,
             model=args.model,
+            provider=args.image_provider,
+            comfyui_base_url=args.comfyui_base_url,
+            comfyui_workflow=args.comfyui_workflow,
+            comfyui_style_image=args.comfyui_style_image,
+            comfyui_timeout=args.comfyui_timeout,
             force=args.force_images,
         )
 

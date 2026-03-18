@@ -1,0 +1,167 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "__CHECKPOINT_NAME__"
+    },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "2": {
+    "inputs": {
+      "text": "__POSITIVE_PROMPT__",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "3": {
+    "inputs": {
+      "text": "__NEGATIVE_PROMPT__",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "4": {
+    "inputs": {
+      "image": "__CONTROL_IMAGE__"
+    },
+    "class_type": "LoadImage"
+  },
+  "5": {
+    "inputs": {
+      "control_net_name": "__CONTROLNET_NAME__"
+    },
+    "class_type": "ControlNetLoader"
+  },
+  "6": {
+    "inputs": {
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "control_net": [
+        "5",
+        0
+      ],
+      "image": [
+        "4",
+        0
+      ],
+      "strength": "__CONTROL_STRENGTH__",
+      "start_percent": 0.0,
+      "end_percent": 1.0
+    },
+    "class_type": "ControlNetApplyAdvanced"
+  },
+  "7": {
+    "inputs": {
+      "image": "__IPADAPTER_IMAGE__"
+    },
+    "class_type": "LoadImage"
+  },
+  "8": {
+    "inputs": {
+      "clip_name": "__CLIP_VISION_MODEL__"
+    },
+    "class_type": "CLIPVisionLoader"
+  },
+  "9": {
+    "inputs": {
+      "ipadapter_file": "__IPADAPTER_MODEL__"
+    },
+    "class_type": "IPAdapterModelLoader"
+  },
+  "10": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "ipadapter": [
+        "9",
+        0
+      ],
+      "image": [
+        "7",
+        0
+      ],
+      "clip_vision": [
+        "8",
+        0
+      ],
+      "weight": "__IPADAPTER_WEIGHT__",
+      "weight_type": "linear",
+      "combine_embeds": "concat",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "embeds_scaling": "V only"
+    },
+    "class_type": "IPAdapterAdvanced"
+  },
+  "11": {
+    "inputs": {
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage"
+  },
+  "12": {
+    "inputs": {
+      "seed": "__SEED__",
+      "steps": "__STEPS__",
+      "cfg": "__CFG__",
+      "sampler_name": "__SAMPLER_NAME__",
+      "scheduler": "__SCHEDULER__",
+      "denoise": "__DENOISE__",
+      "model": [
+        "10",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "KSampler"
+  },
+  "13": {
+    "inputs": {
+      "samples": [
+        "12",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "class_type": "VAEDecode"
+  },
+  "14": {
+    "inputs": {
+      "filename_prefix": "__OUTPUT_PREFIX__",
+      "images": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "SaveImage"
+  }
+}

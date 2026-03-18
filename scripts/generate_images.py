@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate mixed-shot knowledge-video images with Alibaba Cloud Model Studio."""
+"""Generate mixed-shot knowledge-video images via DashScope or ComfyUI."""
 
 from __future__ import annotations
 
@@ -19,9 +19,17 @@ from _single_video_utils import (
     parse_storyboard,
     safe_json_dump,
 )
+from comfyui_workflow import (
+    check_comfyui_server,
+    execute_comfyui_workflow,
+    prepare_comfyui_workflow,
+    resolve_comfyui_options,
+)
 
 SIZE_PLAN = ["1792*1008", "1664*928", "1280*720"]
 INTER_SHOT_DELAY_SECONDS = 2.0
+ENV_IMAGE_PROVIDER = "ARTICLE_TO_VIDEO_IMAGE_PROVIDER"
+DEFAULT_IMAGE_PROVIDER = "dashscope"
 
 
 def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
@@ -81,6 +89,13 @@ def ensure_api_key() -> str:
         raise RuntimeError("未设置 DASHSCOPE_API_KEY 环境变量")
     dashscope.api_key = api_key
     return api_key
+
+
+def resolve_image_provider(cli_provider: Optional[str] = None) -> str:
+    provider = (cli_provider or os.environ.get(ENV_IMAGE_PROVIDER) or DEFAULT_IMAGE_PROVIDER).strip().lower()
+    if provider not in {"dashscope", "comfyui"}:
+        raise RuntimeError(f"不支持的图片 provider: {provider}")
+    return provider
 
 
 def _format_list(items: List[str], bullet: str = "- ") -> List[str]:
@@ -414,6 +429,11 @@ def generate_attempt(
     attempt: int,
     output_dir: Path,
     model: str,
+    provider: str,
+    comfyui_base_url: Optional[str] = None,
+    comfyui_workflow: Optional[str] = None,
+    comfyui_style_image: Optional[str] = None,
+    comfyui_timeout: Optional[int] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
     shot_attempt_dir = attempt_dir(output_dir, shot_num)
@@ -441,12 +461,75 @@ def generate_attempt(
     request_payload = {
         "shot_num": shot_num,
         "attempt": attempt,
+        "provider": provider,
         "model": model,
-        "size_plan": SIZE_PLAN,
         "semantic_attempt": True,
         "slide_spec": slide_spec,
         "negative_prompt": negative_prompt,
     }
+    if provider == "comfyui":
+        try:
+            options = resolve_comfyui_options(
+                base_url=comfyui_base_url,
+                workflow_template=comfyui_workflow,
+                style_image=comfyui_style_image,
+                timeout_seconds=comfyui_timeout,
+            )
+            prepared = prepare_comfyui_workflow(
+                slide_spec=slide_spec,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                shot_num=shot_num,
+                attempt=attempt,
+                output_dir=output_dir,
+                options=options,
+            )
+            request_payload.update(
+                {
+                    "comfyui": {
+                        "base_url": prepared["base_url"],
+                        "workflow_template": prepared["workflow_template"],
+                        "materialized_workflow_path": prepared["materialized_workflow_path"],
+                        "control_image_path": prepared["control_image_path"],
+                        "style_image_path": prepared["style_image_path"],
+                        "output_prefix": prepared["output_prefix"],
+                        "replacements": prepared["replacements"],
+                    }
+                }
+            )
+            safe_json_dump(request_path, request_payload)
+            execute_comfyui_workflow(
+                prepared=prepared,
+                output_image_path=png_path,
+                response_path=response_path,
+            )
+            return {
+                "shot_num": shot_num,
+                "attempt": attempt,
+                "status": "generated",
+                "image_path": str(png_path),
+                "request_path": str(request_path),
+                "response_path": str(response_path),
+            }
+        except Exception as exc:
+            error_payload = {
+                "provider": "comfyui",
+                "code": "exception",
+                "message": str(exc),
+            }
+            safe_json_dump(request_path, request_payload)
+            safe_json_dump(response_path, error_payload)
+            return {
+                "shot_num": shot_num,
+                "attempt": attempt,
+                "status": "error",
+                "error": str(exc),
+                "request_path": str(request_path),
+                "response_path": str(response_path),
+                "image_path": str(png_path),
+            }
+
+    request_payload["size_plan"] = SIZE_PLAN
     safe_json_dump(request_path, request_payload)
 
     last_response: Dict[str, Any] = {}
@@ -463,7 +546,7 @@ def generate_attempt(
                 continue
             try:
                 download_image(url, png_path)
-            except Exception as exc:
+            except Exception:
                 try:
                     download_image(url, png_path)
                 except Exception as second_exc:
@@ -509,9 +592,25 @@ def generate_images_for_storyboard(
     attempt: int,
     shot_numbers: Optional[Iterable[int]] = None,
     model: str = "qwen-image-2.0",
+    provider: str = DEFAULT_IMAGE_PROVIDER,
+    comfyui_base_url: Optional[str] = None,
+    comfyui_workflow: Optional[str] = None,
+    comfyui_style_image: Optional[str] = None,
+    comfyui_timeout: Optional[int] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
-    ensure_api_key()
+    resolved_provider = resolve_image_provider(provider)
+    if resolved_provider == "dashscope":
+        ensure_api_key()
+    else:
+        check_comfyui_server(
+            resolve_comfyui_options(
+                base_url=comfyui_base_url,
+                workflow_template=comfyui_workflow,
+                style_image=comfyui_style_image,
+                timeout_seconds=comfyui_timeout,
+            )
+        )
     shots = parse_storyboard(storyboard_path)
     selected = (
         set(shot["shot_num"] for shot in shots)
@@ -532,23 +631,38 @@ def generate_images_for_storyboard(
             attempt=attempt,
             output_dir=output_path,
             model=model,
+            provider=resolved_provider,
+            comfyui_base_url=comfyui_base_url,
+            comfyui_workflow=comfyui_workflow,
+            comfyui_style_image=comfyui_style_image,
+            comfyui_timeout=comfyui_timeout,
             force=force,
         )
         results.append(result)
         time.sleep(INTER_SHOT_DELAY_SECONDS)
 
-    payload = {"attempt": attempt, "model": model, "results": results}
+    payload = {"attempt": attempt, "provider": resolved_provider, "model": model, "results": results}
     safe_json_dump(output_path / f"generation-attempt-{attempt:02d}.json", payload)
     return payload
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="生成阿里云知识视频混合镜头图片")
+    parser = argparse.ArgumentParser(description="生成知识视频混合镜头图片（DashScope 或 ComfyUI）")
     parser.add_argument("storyboard", help="分镜脚本路径")
     parser.add_argument("-o", "--output", required=True, help="输出目录，例如 05-images/video-1")
     parser.add_argument("--attempt", type=int, default=1, help="语义生成轮次，从 1 开始")
     parser.add_argument("--shots", help="只生成指定镜号，逗号分隔，例如 1,2,4")
     parser.add_argument("--model", default="qwen-image-2.0", help="图片模型")
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get(ENV_IMAGE_PROVIDER, DEFAULT_IMAGE_PROVIDER),
+        choices=["dashscope", "comfyui"],
+        help="图片生成 provider",
+    )
+    parser.add_argument("--comfyui-base-url", help="ComfyUI 服务地址，默认读取 COMFYUI_BASE_URL")
+    parser.add_argument("--comfyui-workflow", help="ComfyUI API workflow 模板路径")
+    parser.add_argument("--comfyui-style-image", help="可选：IPAdapter 参考图路径")
+    parser.add_argument("--comfyui-timeout", type=int, help="ComfyUI 单镜超时时间（秒）")
     parser.add_argument("--force", action="store_true", help="覆盖已有尝试产物")
     args = parser.parse_args()
 
@@ -559,9 +673,16 @@ def main() -> None:
         attempt=args.attempt,
         shot_numbers=shot_numbers,
         model=args.model,
+        provider=args.provider,
+        comfyui_base_url=args.comfyui_base_url,
+        comfyui_workflow=args.comfyui_workflow,
+        comfyui_style_image=args.comfyui_style_image,
+        comfyui_timeout=args.comfyui_timeout,
         force=args.force,
     )
-    print(f"✅ 已完成 attempt {args.attempt}，共处理 {len(payload['results'])} 个镜头")
+    print(
+        f"✅ 已完成 attempt {args.attempt}，provider={payload['provider']}，共处理 {len(payload['results'])} 个镜头"
+    )
 
 
 if __name__ == "__main__":
